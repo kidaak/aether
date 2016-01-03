@@ -1,0 +1,61 @@
+# Don't include intermediate JS
+lib
+
+lib-cov
+*.seed
+*.log
+*.csv
+*.dat
+*.out
+*.pid
+*.gz
+
+node_modules/
+pids
+logs
+results
+
+npm-debug.log
+
+# OS X
+.DS_Store
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+
+# Emacs
+*.*~
+*.#
+.#*
+*#
+
+# Vim
+.*.sw[a-z]
+*.un~i
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+*.diff
+*.err
+*.orig
+*.log
+*.rej
+*.vi
+*.sass-cache
+
+# OS or Editor folders
+.cache
+.project
+.settings
+.tmproj
+.idea
+nbproject
+
+.grunt
+coverage/
