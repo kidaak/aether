@@ -1,3 +1,7 @@
+self = window if window? and not self?
+self = global if global? and not self?
+self.self ?= self
+
 _ = window?._ ? self?._ ? global?._ ? require 'lodash'  # rely on lodash existing, since it busts CodeCombat to browserify it--TODO
 traceur = window?.traceur ? self?.traceur ? global?.traceur ? require 'traceur'  # rely on traceur existing, since it busts CodeCombat to browserify it--TODO
 
@@ -98,8 +102,8 @@ module.exports = class Aether
 
   # Determine whether two strings of code produce different lint problems.
   hasChangedLintProblems: (a, b) ->
-    aLintProblems = [p.id, p.message, p.hint] for p in @getAllProblems @lint a
-    bLintProblems = [p.id, p.message, p.hint] for p in @getAllProblems @lint b
+    aLintProblems = ([p.id, p.message, p.hint] for p in @getAllProblems @lint a)
+    bLintProblems = ([p.id, p.message, p.hint] for p in @getAllProblems @lint b)
     return not _.isEqual aLintProblems, bLintProblems
 
   # Return a beautified representation of the code (cleaning up indentation, etc.)
@@ -109,9 +113,15 @@ module.exports = class Aether
   # Transpile it. Even if it can't transpile, it will give syntax errors and warnings and such. Clears any old state.
   transpile: (@raw) ->
     @reset()
-    [@raw, @replacedLoops] = @language.replaceLoops @raw if @options.simpleLoops
-    @problems = @lint @raw
-    @pure = @purifyCode @raw
+    rawCode = @raw
+    if @options.simpleLoops
+      rawCode = _.cloneDeep @raw
+      [rawCode, @replacedLoops, loopProblems] = @language.replaceLoops rawCode
+    @problems = @lint rawCode
+    loopProblems ?= []
+    if loopProblems.length > 0
+      @problems.warnings.push loopProblems...
+    @pure = @purifyCode rawCode
     @pure
 
   # Perform some fast static analysis (without transpiling) and find any lint problems.
@@ -123,7 +133,9 @@ module.exports = class Aether
   # Return a ready-to-execute, instrumented, sandboxed function from the purified code.
   createFunction: ->
     fn = protectBuiltins.createSandboxedFunction @options.functionName or 'foo', @pure, @
-    protectBuiltins.wrapWithSandbox @, fn
+    if @options.protectBuiltins
+      fn = protectBuiltins.wrapWithSandbox @, fn
+    fn
 
   # Like createFunction, but binds method to thisValue.
   createMethod: (thisValue) ->
@@ -132,8 +144,10 @@ module.exports = class Aether
   # If you want to sandbox a generator each time it's called, then call result of createFunction and hand to this.
   sandboxGenerator: (fn) ->
     oldNext = fn.next
-    fn.next = protectBuiltins.wrapWithSandbox @, ->
+    fn.next = ->
       oldNext.apply fn, arguments
+    if @options.protectBuiltins
+      fn.next = protectBuiltins.wrapWithSandbox @, fn.next
     fn
 
   # Convenience wrapper for running the compiled function with default error handling
@@ -153,6 +167,9 @@ module.exports = class Aether
 
   # Create a standard Aether problem object out of some sort of transpile or runtime problem.
   createUserCodeProblem: problems.createUserCodeProblem
+
+  updateProblemContext: (problemContext) ->
+    @options.problemContext = problemContext
 
   # Add problem to the proper level's array within the given problems object (or @problems).
   addProblem: (problem, problems=null) ->
@@ -174,8 +191,8 @@ module.exports = class Aether
     varNames[parameter] = true for parameter in @options.functionParameters
     preNormalizationTransforms = [
       transforms.makeGatherNodeRanges originalNodeRanges, wrappedCode, @language.wrappedCodePrefix
-      transforms.makeCheckThisKeywords @allGlobals, varNames
-      transforms.checkIncompleteMembers
+      transforms.makeCheckThisKeywords @allGlobals, varNames, @language, @options.problemContext
+      transforms.makeCheckIncompleteMembers @language, @options.problemContext
     ]
 
     try
@@ -226,13 +243,20 @@ module.exports = class Aether
         return ''
 
     postNormalizationTransforms = []
-    postNormalizationTransforms.unshift transforms.makeLoopsYieldConditionally(@replacedLoops, @language.wrappedCodePrefix) if @options.yieldConditionally
-    postNormalizationTransforms.unshift transforms.makeYieldConditionally() if @options.yieldConditionally
+    if @options.yieldConditionally and @options.simpleLoops
+      postNormalizationTransforms.unshift transforms.makeSimpleLoopsYieldAutomatically @replacedLoops, @language.wrappedCodePrefix
+    if @options.yieldConditionally and @options.whileTrueAutoYield
+      postNormalizationTransforms.unshift transforms.makeWhileTrueYieldAutomatically @replacedLoops, @language.wrappedCodePrefix
+    if @options.yieldConditionally
+      postNormalizationTransforms.unshift transforms.makeYieldConditionally @options.simpleLoops, @options.whileTrueAutoYield
+    if @options.yieldConditionally and (@options.simpleLoops or @options.whileTrueAutoYield)
+      postNormalizationTransforms.unshift transforms.makeIndexWhileLoops()
     postNormalizationTransforms.unshift transforms.makeYieldAutomatically() if @options.yieldAutomatically
     if @options.includeFlow
-      postNormalizationTransforms.unshift transforms.makeInstrumentStatements varNames
+      varNamesToRecord = if @options.noVariablesInFlow then null else varNames
+      postNormalizationTransforms.unshift transforms.makeInstrumentStatements @language, varNamesToRecord, true
     else if @options.includeMetrics or @options.executionLimit
-      postNormalizationTransforms.unshift transforms.makeInstrumentStatements()
+      postNormalizationTransforms.unshift transforms.makeInstrumentStatements @language
     postNormalizationTransforms.unshift transforms.makeInstrumentCalls() if @options.includeMetrics or @options.includeFlow
     if normalizedSourceMap
       postNormalizationTransforms.unshift transforms.makeFindOriginalNodes originalNodeRanges, @language.wrappedCodePrefix, normalizedSourceMap, normalizedNodeIndex

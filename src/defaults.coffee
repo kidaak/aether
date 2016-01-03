@@ -12,7 +12,10 @@ module.exports = defaults =
   yieldConditionally: false  # Also bad name, but what it would do is make it yield whenever this._aetherShouldYield is true (and clear it)
   executionCosts: {}  # execution  # We don't use this yet
   noSerializationInFlow: false
+  noVariablesInFlow: false
+  skipDuplicateUserInfoInFlow: false
   includeFlow: true
   includeMetrics: true
   includeStyle: true
   protectAPI: false
+  protectBuiltins: true

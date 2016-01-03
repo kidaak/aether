@@ -40,6 +40,8 @@ module.exports = (options) ->
         ]
       problems:
         type: ['object', 'undefined']
+      problemContext:
+        type: ['object', 'null', 'undefined']
       includeFlow:
         type: 'boolean'
         default: true
@@ -47,6 +49,15 @@ module.exports = (options) ->
       noSerializationInFlow:
         type: 'boolean'
         default: false
+        description: "Whether to skip serializing variable values when recording variables in flow."
+      noVariablesInFlow:
+        type: 'boolean'
+        default: false
+        description: "Whether to skip capturing variable values at all when instrumenting flow."
+      skipDuplicateUserInfoInFlow:
+        type: 'boolean'
+        default: false
+        description: "Whether to skip recording calls with the same userInfo as the previous call when instrumenting flow."
       includeMetrics:
         type: 'boolean'
         default: true
@@ -61,3 +72,11 @@ module.exports = (options) ->
         type: 'boolean'
         default: false
         description: "Whether simple loops will be supported, per language.  E.g. 'loop()' will be transpiled as 'while(true)'."
+      protectBuiltins:
+        type: 'boolean'
+        default: true
+        description: 'Whether builtins will be protected and restored for enhanced security.'
+      whileTrueAutoYield:
+        type: 'boolean'
+        default: false
+        description: "Make while True loops automatically yield if no other yields"

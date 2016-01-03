@@ -5,6 +5,9 @@ module.exports = class Language
   id: 'abstract-language'  # Snake-case id of the programming language
   parserID: 'abstract-parser'
   runtimeGlobals: {}  # Like {__lua: require('lua2js').runtime}
+  thisValue: 'this' # E.g. in Python it is 'self'
+  thisValueAccess: 'this.' # E.g. in Python it is 'self.'
+  wrappedCodeIndentLen: 0
 
   constructor: (@version) ->
 
@@ -28,7 +31,7 @@ module.exports = class Language
 
   # Replace 'loop' statement with equivalent of 'while(true)'
   # Return updated code, and an array of starting range indexes for replaced loop keywords
-  # E.g. in JavaScript 'loop()' is replaced with 'while(true)'
+  # E.g. in JavaScript 'loop {}' is replaced with 'while(true) {}'
   replaceLoops: (rawCode) ->
     console.warn "Simple loop not implemented for #{@name}"
     [rawCode, []]
@@ -46,6 +49,11 @@ module.exports = class Language
     @wrappedCodePrefix ?= ''
     @wrappedCodeSuffix ?= ''
     @wrappedCodePrefix + rawCode + @wrappedCodeSuffix
+
+  # Languages requiring extra indent in their wrapped code may need to remove it from ranges
+  # E.g. Python
+  removeWrappedIndent: (range) ->
+    range
 
   # Hacky McHack step for things we can't easily change via AST transforms (which preserve statement ranges).
   # TODO: Should probably refactor and get rid of this soon.
@@ -78,3 +86,9 @@ module.exports = class Language
     else
       result = cloneFn obj
     result
+
+  pryOpenCall: (call, val, finder) ->
+    null
+
+  rewriteFunctionID: (fid) ->
+    fid

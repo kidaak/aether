@@ -4,7 +4,6 @@ S = require('esprima').Syntax
 SourceMap = require 'source-map'
 
 ranges = require './ranges'
-{commonMethods} = require './problems'
 
 statements = [S.EmptyStatement, S.ExpressionStatement, S.BreakStatement, S.ContinueStatement, S.DebuggerStatement, S.DoWhileStatement, S.ForStatement, S.FunctionDeclaration, S.ClassDeclaration, S.IfStatement, S.ReturnStatement, S.SwitchStatement, S.ThrowStatement, S.TryStatement, S.VariableStatement, S.WhileStatement, S.WithStatement, S.VariableDeclaration]
 
@@ -20,10 +19,14 @@ getParentsOfTypes = (node, types) ->
 getFunctionNestingLevel = (node) ->
   getParentsOfTypes(node, [S.FunctionExpression]).length
 
-possiblyGeneratorifyAncestorFunction = (node) ->
-  while node.type isnt S.FunctionExpression
+getImmediateParentOfType = (node, type) ->
+  while node
+    return node if node.type is type
     node = node.parent
-  node.mustBecomeGeneratorFunction = true
+
+possiblyGeneratorifyAncestorFunction = (node) ->
+  node = getImmediateParentOfType node, S.FunctionExpression
+  node?.mustBecomeGeneratorFunction = true
 
 possiblyGeneratorifyUserFunction = (fnExpr, node) ->
   # Look for a CallExpression in fnExpr, that isn't in an inner function
@@ -45,7 +48,7 @@ possiblyGeneratorifyUserFunction = (fnExpr, node) ->
       return true if possiblyGeneratorifyUserFunction fnExpr, child
   false
 
-getUserFnMap = (startNode) ->
+getUserFnMap = (startNode, language) ->
   # Return map of CallExpressions to user defined FunctionExpressions
   # Parses whole AST, given any startNode in user code
   # Assumes normalized AST, and morphAST helpers
@@ -131,6 +134,8 @@ getUserFnMap = (startNode) ->
 
       if fn.body?.body?
         for key, child of fn.body.body
+          if child.body?.body?
+            buildScope scope, child
           continue if key is 'parent' or key is 'leadingComments' or key is 'originalNode'
           if child?.type is S.ExpressionStatement and child.expression?.type is S.AssignmentExpression
             if child.expression.right?.type is S.FunctionExpression
@@ -158,36 +163,44 @@ getUserFnMap = (startNode) ->
     buildScope scope, wrapperFn if wrapperFn
     scope
 
-  findCall = (scope, fnVal) ->
+  findCall = (scope, fnVal, scopesToSkip={}) ->
     # Find a CallExpression that resolves to fnVal
+    # Called when resolving a value
     return [null, null] unless fnVal
+    # console.log 'findCall', scope, fnVal, scopesToSkip
     for c in scope.calls
       cVal = parseVal c.right.callee
-      cVal = resolveVal scope, scope.varMap, cVal
+      cVal = resolveVal scope, cVal, scopesToSkip
       return [scope, c.right] if _.isEqual(cVal, fnVal)
     for childScope in scope.children
       if childScope.current
         childFn = parseVal childScope.current.left
-        if childFn isnt fnVal
-          return call if call = findCall childScope, fnVal
+        unless _.isEqual childFn, fnVal
+          [newScope, callExpr] = findCall childScope, fnVal, scopesToSkip
+          return [newScope, callExpr] if newScope? and callExpr?
     [null, null]
 
-  resolveVal = (scope, vm, val) ->
+  resolveVal = (scope, val, scopesToSkip={}) ->
     # Resolve value based on assignments in this scope
     # E.g. a = tmp1; tmp1 = tmp2; resolveVal(tmp2) resturns 'a'
     return unless val
+    # console.log 'resolveVal', scope, val, scopesToSkip
+    vm = scope.varMap
     # Look locally
     if vm.length > 0
       for i in [vm.length-1..0]
         val = updateVal val, vm[i][0], vm[i][1]
+    # Track current lookup so it isn't recursed later
+    return val if _.isEqual scopesToSkip[val], scope
+    scopesToSkip[val] = scope
     # Look in params if in a function
     if scope.current?.right?.type is S.FunctionExpression and scope.current.right.params.length > 0
       for i in [0..scope.current.right.params.length-1]
         pVal = parseVal scope.current.right.params[i]
         if (_.isArray val) and val[0] is pVal or val is pVal
           fnVal = parseVal scope.current.left
-          fnVal = resolveVal scope, scope.varMap, fnVal
-          [newScope, callExpr] = findCall rootScope, fnVal
+          fnVal = resolveVal scope, fnVal, scopesToSkip
+          [newScope, callExpr] = findCall rootScope, fnVal, scopesToSkip
           if newScope and callExpr
             # Update val based on passed in argument, and resolve from new scope
             argVal = parseVal callExpr.arguments[i]
@@ -195,17 +208,17 @@ getUserFnMap = (startNode) ->
               val[0] = argVal
             else
               val = argVal
-            val = resolveVal newScope, newScope.varMap, val
+            val = resolveVal newScope, val, scopesToSkip
           break
     # Look in parent
-    val = resolveVal scope.parent, scope.parent.varMap, val if scope.parent
+    val = resolveVal scope.parent, val, scopesToSkip if scope.parent
     val
 
   resolveFunctions = (scope, fns) ->
     # Resolve all FunctionExpression nodes
     if scope?.current?.right?.type is S.FunctionExpression
       fnVal = parseVal scope.current.left
-      fnVal = resolveVal scope, scope.varMap, fnVal
+      fnVal = resolveVal scope, fnVal
       fns.push [scope.current.right, fnVal]
     resolveFunctions childScope, fns for childScope in scope.children
 
@@ -213,7 +226,13 @@ getUserFnMap = (startNode) ->
     # Resolve all CallExpression nodes
     for call in scope.calls
       val = parseVal call.right.callee
-      val = resolveVal scope, scope.varMap, val
+      val = resolveVal scope, val
+
+      pried = language.pryOpenCall call, val, (x) -> resolveVal scope, parseVal(x)
+
+      if pried && _.isArray(pried)
+        val = pried
+
       calls.push [call.right, val]
     resolveCalls childScope, calls for childScope in scope.children
 
@@ -225,21 +244,22 @@ getUserFnMap = (startNode) ->
 
     resolvedFunctions = []
     resolveFunctions rootScope, resolvedFunctions
-    #console.log 'resolvedFunctions', resolvedFunctions
+    # console.log 'resolvedFunctions', resolvedFunctions
 
     resolvedCalls = []
     resolveCalls rootScope, resolvedCalls
-    #console.log 'resolvedCalls', resolvedCalls
+    # console.log 'resolvedCalls', resolvedCalls
 
     for [call, callVal] in resolvedCalls
       for [fn, fnVal] in resolvedFunctions
+        fnVal = language.rewriteFunctionID fnVal
         if _.isEqual(callVal, fnVal)
           userFnMap.push [call, fn]
           break
         else if (_.isArray callVal) and callVal[0] is fnVal
           userFnMap.push [call, fn]
           break
-    #console.log 'userFnMap', userFnMap
+    # console.log 'userFnMap', userFnMap
   catch error
     console.log 'ERROR in transforms.getUserFnMap', error
   userFnMap
@@ -265,7 +285,7 @@ module.exports.makeGatherNodeRanges = makeGatherNodeRanges = (nodeRanges, code, 
   nodeRanges.push node
 
 # Making
-module.exports.makeCheckThisKeywords = makeCheckThisKeywords = (globals, varNames) ->
+module.exports.makeCheckThisKeywords = makeCheckThisKeywords = (globals, varNames, language, problemContext) ->
   return (node) ->
     if node.type is S.VariableDeclarator
       varNames[node.id.name] = true
@@ -288,32 +308,39 @@ module.exports.makeCheckThisKeywords = makeCheckThisKeywords = (globals, varName
           varNames[param.name] = true for param in p.params if p.params?
           return if varNames[v] is true
         return if /\$$/.test v  # accum$ in CoffeeScript Redux isn't handled properly
-        # TODO: we need to know whether `this` has this method before saying this...
-        message = "Missing `this.` keyword; should be `this.#{v}`."
-        hint = "There is no function `#{v}`, but `this` has a method `#{v}`."
-        range = if node.originalRange then [node.originalRange.start, node.originalRange.end] else null
+        return if problemContext?.thisMethods? and v not in problemContext.thisMethods
+        # TODO: '@' in CoffeeScript isn't really a keyword
+        message = "Missing `#{language.thisValue}` keyword; should be `#{language.thisValueAccess}#{v}`."
+        hint = "There is no function `#{v}`, but `#{language.thisValue}` has a method `#{v}`."
+        if node.originalRange
+          range = language.removeWrappedIndent [node.originalRange.start, node.originalRange.end]
         problem = @createUserCodeProblem type: 'transpile', reporter: 'aether', kind: 'MissingThis', message: message, hint: hint, range: range  # TODO: code/codePrefix?
         @addProblem problem
 
-module.exports.checkIncompleteMembers = checkIncompleteMembers = (node) ->
-  #console.log 'check incomplete members', node, node.source() if node.source().search('this.') isnt -1
-  if node.type is 'ExpressionStatement'
-    exp = node.expression
-    if exp.type is 'MemberExpression'
-      # Handle missing parentheses, like in:  this.moveUp;
-      if exp.property.name is "IncompleteThisReference"
-        kind = 'IncompleteThis'
-        m = "this.what? (Check available spells below.)"
-        hint = ''
-      else
-        kind = 'NoEffect'
-        m = "#{exp.source()} has no effect."
-        if exp.property.name in commonMethods
-          m += " It needs parentheses: #{exp.source()}()"
-        else
-          hint = "Is it a method? Those need parentheses: #{exp.source()}()"
-      problem = @createUserCodeProblem type: 'transpile', reporter: 'aether', message: m, kind: kind, hint: hint, range: if node.originalRange then [node.originalRange.start, node.originalRange.end] else null  # TODO: code/codePrefix?
-      @addProblem problem
+module.exports.makeCheckIncompleteMembers = makeCheckIncompleteMembers = (language, problemContext) ->
+  return (node) ->
+    # console.log 'check incomplete members', node, node.source() if node.source().search('this.') isnt -1
+    if node.type is 'ExpressionStatement'
+      exp = node.expression
+      if exp.type is 'MemberExpression'
+        # Handle missing parentheses, like in:  this.moveUp;
+        if exp.property.name is "IncompleteThisReference"
+          kind = 'IncompleteThis'
+          m = "this.what? (Check available spells below.)"
+          hint = ''
+        else if exp.object.source() is language.thisValue
+          kind = 'NoEffect'
+          m = "#{exp.source()} has no effect."
+          if problemContext?.thisMethods? and exp.property.name in problemContext.thisMethods
+            m += " It needs parentheses: #{exp.source()}()"
+          else if problemContext?.commonThisMethods? and exp.property.name in problemContext.commonThisMethods
+            m = "#{exp.source()} is not currently available."
+          else
+            hint = "Is it a method? Those need parentheses: #{exp.source()}()"
+          if node.originalRange
+            range = language.removeWrappedIndent [node.originalRange.start, node.originalRange.end]
+          problem = @createUserCodeProblem type: 'transpile', reporter: 'aether', message: m, kind: kind, hint: hint, range: range  # TODO: code/codePrefix?
+          @addProblem problem
 
 ########## After JS_WALA Normalization ##########
 
@@ -337,45 +364,88 @@ module.exports.makeFindOriginalNodes = makeFindOriginalNodes = (originalNodes, c
 
 # Now that it's normalized to this: https://github.com/nwinter/JS_WALA/blob/master/normalizer/doc/normalization.md
 # ... we can basically just put a yield check in after every CallExpression except the outermost one if we are yielding conditionally.
-module.exports.makeYieldConditionally = makeYieldConditionally = ->
+module.exports.makeYieldConditionally = makeYieldConditionally = (simpleLoops, whileTrueAutoYield) ->
   userFnMap = null
   return (node) ->
     if node.type is S.ExpressionStatement and node.expression.right?.type is S.CallExpression
       # Because we have a wrapper function which shouldn't yield, we only yield inside nested functions.
       # Don't yield after calls to generatorified inner functions, because their yields are passed upwards
       return unless getFunctionNestingLevel(node) > 1
-      userFnMap = getUserFnMap(node) unless userFnMap
+      userFnMap = getUserFnMap(node, @language) unless userFnMap
       unless getUserFnExpr(userFnMap, node.expression.right)?.mustBecomeGeneratorFunction
-        node.update "#{node.source()} if (_aether._shouldYield) { var _yieldValue = _aether._shouldYield; _aether._shouldYield = false; yield _yieldValue; }"
+        # Track conditional yields executed if supporting simpleLoops or whileTrueAutoYield
+        if (simpleLoops or whileTrueAutoYield) and parentWhile = getImmediateParentOfType node, S.WhileStatement
+          yieldCountVar = "__yieldCount#{parentWhile.whileIndex}"
+          autoYieldStmt = "if (typeof #{yieldCountVar} !== 'undefined' && #{yieldCountVar} !== null) {#{yieldCountVar}++;}"
+        else
+          autoYieldStmt = ""
+        node.update "#{node.source()} if (_aether._shouldYield) { var _yieldValue = _aether._shouldYield; _aether._shouldYield = false; if (this.onAetherYield) { this.onAetherYield(_yieldValue); } yield _yieldValue; #{autoYieldStmt} }"
       node.yields = true
       possiblyGeneratorifyAncestorFunction node unless node.mustBecomeGeneratorFunction
     else if node.mustBecomeGeneratorFunction
-      node.update node.source().replace /^function \(/, 'function* ('
+      node.update node.source().replace /^function /, 'function* '
     else if node.type is S.AssignmentExpression and node.right?.type is S.CallExpression
       # Update call to generatorified user function to process yields, and set return result
-      userFnMap = getUserFnMap(node) unless userFnMap
-      if (fnExpr = getUserFnExpr(userFnMap, node.right)) and possiblyGeneratorifyUserFunction fnExpr
-        node.update "var __gen#{node.left.source()} = #{node.right.source()}; while (true) { var __result#{node.left.source()} = __gen#{node.left.source()}.next(); if (__result#{node.left.source()}.done) { #{node.left.source()} = __result#{node.left.source()}.value; break; } yield __result#{node.left.source()}.value;}"
+      userFnMap = getUserFnMap(node, @language) unless userFnMap
+      fnExpr = getUserFnExpr(userFnMap, node.right)
+      if fnExpr and possiblyGeneratorifyUserFunction fnExpr
+        if (simpleLoops or whileTrueAutoYield) and parentWhile = getImmediateParentOfType node, S.WhileStatement
+          yieldCountVar = "__yieldCount#{parentWhile.whileIndex}"
+          autoYieldStmt = "if (typeof #{yieldCountVar} !== 'undefined' && #{yieldCountVar} !== null) {#{yieldCountVar}++;}"
+        else
+          autoYieldStmt = ""
+        node.update "var __gen#{node.left.source()} = #{node.right.source()}; while (true) { var __result#{node.left.source()} = __gen#{node.left.source()}.next(); if (__result#{node.left.source()}.done) { #{node.left.source()} = __result#{node.left.source()}.value; break; } var _yieldValue = __result#{node.left.source()}.value; if (this.onAetherYield) { this.onAetherYield(_yieldValue); } yield _yieldValue; #{autoYieldStmt} }"
 
-module.exports.makeLoopsYieldConditionally = makeLoopsYieldConditionally = (replacedLoops, wrappedCodePrefix)->
+module.exports.makeSimpleLoopsYieldAutomatically = makeSimpleLoopsYieldAutomatically = (replacedLoops, wrappedCodePrefix) ->
+  # Add a yield to the end of simple loops, which executes if no other yields do
+  # This ensures simple loops *always* yield
   # replacedLoops is an array of starting range indexes for replaced loop keywords
   # replacedLoops values are off by wrappedCodePrefix.length, because @language.wrap() is called later
   replacedLoops ?= []
+  wrappedCodePrefix ?= ""
   return (node) ->
     return unless replacedLoops.length > 0 and node.type is S.WhileStatement
     # TODO: is originalNode supposed to be hanging off children of WhileStatement node?
     # TODO: https://github.com/codecombat/aether/issues/105
     if node?.body?.originalNode?.range?[0] - wrappedCodePrefix.length in replacedLoops
       if node.body.body?
-        bodySource = ""
+        bodySource = "var __yieldCount#{node.whileIndex} = 0;"
         for item in node.body.body
           if item.source?
             bodySource += item.source()
           else
             console.warn "No source() for", item
             return
-        bodySource += " if (_aether._shouldYield) { var _yieldValue = _aether._shouldYield; _aether._shouldYield = false; yield _yieldValue; }"
+        bodySource += " if (this.onAetherYield) { this.onAetherYield('simple loop'); } if (__yieldCount#{node.whileIndex} === 0) { yield 'simple loop...';}"
         node.update "while (#{node.test.source()}) {#{bodySource}}"
+        possiblyGeneratorifyAncestorFunction node
+
+module.exports.makeWhileTrueYieldAutomatically = makeWhileTrueYieldAutomatically = (replacedLoops, wrappedCodePrefix) ->
+  # Add a yield to the end of while True loops, which executes if no other yields do
+  # This ensures while True loops *always* yield
+  return (node) ->
+    return unless node.type is S.WhileStatement
+    # Skip simpleLoops
+    return if replacedLoops?.length > 0 and node?.body?.originalNode?.range?[0] - wrappedCodePrefix.length in replacedLoops
+    return unless node.test?.originalNode?.test?.type is 'Literal' and node.test?.originalNode?.test?.value is true
+    if node.body.body?
+      bodySource = "var __yieldCount#{node.whileIndex} = 0;"
+      for item in node.body.body
+        if item.source?
+          bodySource += item.source()
+        else
+          console.warn "No source() for", item
+          return
+      bodySource += " if (this.onAetherYield) { this.onAetherYield('while true'); } if (__yieldCount#{node.whileIndex} === 0) { yield 'while true...';}"
+      node.update "while (#{node.test.source()}) {#{bodySource}}"
+      possiblyGeneratorifyAncestorFunction node
+
+module.exports.makeIndexWhileLoops = makeIndexWhileLoops = ->
+  # Tag while loops with a unique index so yields can be tracked
+  whileIndex = 0
+  return (node) ->
+    if parentWhile = getImmediateParentOfType node, S.WhileStatement
+      parentWhile.whileIndex = whileIndex++ unless parentWhile.whileIndex?
 
 module.exports.makeYieldAutomatically = makeYieldAutomatically = ->
   userFnMap = null
@@ -387,7 +457,7 @@ module.exports.makeYieldAutomatically = makeYieldAutomatically = ->
       # Don't yield after calls to generatorified inner functions, because their yields are passed upwards
       return unless getFunctionNestingLevel(node) > 1
       if node.type is S.ExpressionStatement and node.expression.right?.type is S.CallExpression
-        userFnMap = getUserFnMap(node) unless userFnMap
+        userFnMap = getUserFnMap(node, @language) unless userFnMap
         unless getUserFnExpr(userFnMap, node.expression.right)?.mustBecomeGeneratorFunction
           node.update "#{node.source()} yield 'waiting...';"
       else
@@ -395,14 +465,14 @@ module.exports.makeYieldAutomatically = makeYieldAutomatically = ->
       node.yields = true
       possiblyGeneratorifyAncestorFunction node unless node.mustBecomeGeneratorFunction
     else if node.mustBecomeGeneratorFunction
-      node.update node.source().replace /^function \(/, 'function* ('
+      node.update node.source().replace /^function /, 'function* '
     else if node.type is S.AssignmentExpression and node.right?.type is S.CallExpression
       # Update call to generatorified user function to process yields, and set return result
-      userFnMap = getUserFnMap(node) unless userFnMap
+      userFnMap = getUserFnMap(node, @language) unless userFnMap
       if (fnExpr = getUserFnExpr(userFnMap, node.right)) and possiblyGeneratorifyUserFunction fnExpr
         node.update "var __gen#{node.left.source()} = #{node.right.source()}; while (true) { var __result#{node.left.source()} = __gen#{node.left.source()}.next(); if (__result#{node.left.source()}.done) { #{node.left.source()} = __result#{node.left.source()}.value; break; } yield __result#{node.left.source()}.value;}"
 
-module.exports.makeInstrumentStatements = makeInstrumentStatements = (varNames) ->
+module.exports.makeInstrumentStatements = makeInstrumentStatements = (language, varNames, includeFlow) ->
   # set up any state tracking here
   return (node) ->
     orig = node.originalNode
@@ -423,14 +493,15 @@ module.exports.makeInstrumentStatements = makeInstrumentStatements = (varNames) 
     else if orig.parent?.type is S.VariableDeclarator and orig.parent.parent?.type is S.VariableDeclaration and orig.parent.parent.originalRange
       orig = orig.parent.parent
     # TODO: actually save this into aether.flow, and have it happen before the yield happens
-    safeRange = ranges.stringifyRange orig.originalRange.start, orig.originalRange.end
+    unwrappedRange = language.removeWrappedIndent [orig.originalRange.start, orig.originalRange.end]
+    safeRange = ranges.stringifyRange unwrappedRange[0], unwrappedRange[1]
     prefix = "_aether.logStatementStart(#{safeRange});"
     if varNames
       loggers = ("_aether.vars['#{varName}'] = typeof #{varName} == 'undefined' ? undefined : #{varName};" for varName of varNames)
       logging = " if (!_aether._shouldSkipFlow) { #{loggers.join ' '} }"
     else
       logging = ''
-    suffix = " _aether.logStatement(#{safeRange}, _aether._userInfo, #{if varNames then '!_aether._shouldSkipFlow' else 'false'});"
+    suffix = " _aether.logStatement(#{safeRange}, _aether._userInfo, #{if includeFlow then '!_aether._shouldSkipFlow' else 'false'});"
     if blockStatement
       blockSource = node.source()
       inner = blockSource.substring(blockSource.indexOf('{') + 2, blockSource.lastIndexOf('}'))

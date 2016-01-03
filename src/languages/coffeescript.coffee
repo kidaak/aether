@@ -1,6 +1,6 @@
 _ = window?._ ? self?._ ? global?._ ? require 'lodash'  # rely on lodash existing, since it busts CodeCombat to browserify it--TODO
 
-csredux = require 'coffee-script-redux'
+parserHolder = {}
 estraverse = require 'estraverse'
 
 Language = require './language'
@@ -9,6 +9,14 @@ module.exports = class CoffeeScript extends Language
   name: 'CoffeeScript'
   id: 'coffeescript'
   parserID: 'csredux'
+  thisValue:'@'
+  thisValueAccess:'@'
+  wrappedCodeIndentLen: 4
+
+  constructor: ->
+    super arguments...
+    @indent = Array(@wrappedCodeIndentLen + 1).join ' '
+    parserHolder.csredux ?= self?.aetherCoffeeScriptRedux ? require 'coffee-script-redux'
 
   # Wrap the user code in a function. Store @wrappedCodePrefix and @wrappedCodeSuffix.
   wrap: (rawCode, aether) ->
@@ -16,21 +24,26 @@ module.exports = class CoffeeScript extends Language
     #{aether.options.functionName or 'foo'} = (#{aether.options.functionParameters.join(', ')}) ->
     \n"""
     @wrappedCodeSuffix ?= '\n'
-
-    # Add indentation of 4 spaces to every line
-    indentedCode = ('    ' + line for line in rawCode.split '\n').join '\n'
-
+    indentedCode = (@indent + line for line in rawCode.split '\n').join '\n'
     @wrappedCodePrefix + indentedCode + @wrappedCodeSuffix
+
+  removeWrappedIndent: (range) ->
+    # Assumes range not in @wrappedCodePrefix
+    range = _.cloneDeep range
+    range[0].ofs -= @wrappedCodeIndentLen * range[0].row
+    range[1].ofs -= @wrappedCodeIndentLen * range[1].row
+    range
 
   # Using a third-party parser, produce an AST in the standardized Mozilla format.
   parse: (code, aether) ->
-    csAST = csredux.parse code, {optimise: false, raw: true}
-    jsAST = csredux.compile csAST, {bare: true}
+    csAST = parserHolder.csredux.parse code, {optimise: false, raw: true}
+    jsAST = parserHolder.csredux.compile csAST, {bare: true}
     fixLocations jsAST
     jsAST
 
 
 class StructuredCode
+  # TODO: What does this class do?
   constructor: (code) ->
     [@cursors, @indentations] = @generateOffsets code
     @length = @cursors.length
@@ -69,6 +82,7 @@ class StructuredCode
     { column, line }
 
 fixLocations = (program) ->
+  # TODO: What does this function do?
   structured = new StructuredCode(program.raw)
   estraverse.traverse program,
     leave: (node, parent) ->
