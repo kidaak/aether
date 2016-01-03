@@ -1,403 +1,390 @@
-# Look at jshint's warnings for many, many ideas: http://jshint.com/docs/options
-# And there are others in the Closure compiler: https://developers.google.com/closure/compiler/docs/error-ref
-# And maybe some more here: https://gist.github.com/textarcana/3375708#file_js_code_sniffs.md
-# More: https://github.com/mdevils/node-jscs/blob/master/lib/checker.js
-# More: https://github.com/nzakas/eslint/tree/master/lib/rules
+ranges = require './ranges'
+string_score = require 'string_score'
 
-# Base class for UserCodeProblems
-module.exports.UserCodeProblem = class UserCodeProblem
-  constructor: (aether, reporter='unknown', kind="Unknown") ->
-    @id = reporter + "_" + kind
-    config = aether.options.problems[@id] ? {message: "Unknown problem", level: "error"}
-    @message = config.message
-    @hint = config.hint
-    @level = config.level
+# Problems #################################
+#
+# Error messages and hints:
+#   Processed by markdown
+#   In general, put correct replacement code in a markdown code span.  E.g. "Try `self.moveRight()`"
+#
+#
+# Problem Context (problemContext)
+#
+# Aether accepts a problemContext parameter via the constructor options or directly to createUserCodeProblem
+# This context can be used to craft better errors messages.
+#
+# Example:
+#   Incorrect user code is 'this.attack(Brak);'
+#   Correct user code is 'this.attack("Brak");'
+#   Error: 'Brak is undefined'
+#   If we had a list of expected string references, we could provide a better error message:
+#   'Brak is undefined. Are you missing quotes? Try this.attack("Brak");'
+#
+# Available Context Properties:
+#   stringReferences: values that should be referred to as a string instead of a variable (e.g. "Brak", not Brak)
+#   thisMethods: methods available on the 'this' object
+#   thisProperties: properties available on the 'this' object
+#   commonThisMethods: methods that are available sometimes, but not awlays
+#
 
-  serialize: ->
-    o = {}
-    for own key, value of @
-      o[key] = value
-    o
+# Esprima Harmony's error messages track V8's
+# https://github.com/ariya/esprima/blob/harmony/esprima.js#L194
 
-# {ranges: [[[15, 15], [15, 22]]], id: 'aether_MissingThis', message: 'Missing `this.` keyword; should be `this.getEnemies`.' hint: 'There is no function `getEnemys`, but `this` has a method `getEnemies`.', level: "warning"}
-module.exports.TranspileProblem = class TranspileProblem extends UserCodeProblem
-  constructor: (aether, reporter, kind, error, @userInfo, code='', codePrefix="function wrapped() {\n\"use strict\";\n") ->
-    #console.log "Converting", error, "to a UserCodeProblem"
-    super aether, reporter, kind
-    @type = 'transpile'
-    @userInfo ?= {}
-    code ?= @raw  # hmm...
-    originalLines = code.slice(codePrefix.length).split '\n'
-    lineOffset = codePrefix.split('\n').length - 1
+# JSHint's error and warning messages
+# https://github.com/jshint/jshint/blob/master/src/messages.js
 
-    switch reporter
-      when 'jshint'
-        @message = error.reason
-        line = error.line - codePrefix.split('\n').length
-        if line >= 0
-          if error.evidence?.length
-            startCol = originalLines[line].indexOf error.evidence
-            endCol = startCol + error.evidence.length
-          else
-            [startCol, endCol] = [0, originalLines[line].length - 1]
-          @ranges = [[[line, startCol], [line, endCol]]]
+scoreFuzziness = 0.8
+acceptMatchThreshold = 0.5
+
+module.exports.createUserCodeProblem = (options) ->
+  options ?= {}
+  options.aether ?= @  # Can either be called standalone or as an Aether method
+  if options.type is 'transpile' and options.error
+    extractTranspileErrorDetails options
+  if options.type is 'runtime'
+    extractRuntimeErrorDetails options
+
+  reporter = options.reporter or 'unknown'  # Source of the problem, like 'jshint' or 'esprima' or 'aether'
+  kind = options.kind or 'Unknown'  # Like 'W075' or 'InvalidLHSInAssignment'
+  id = reporter + '_' + kind  # Uniquely identifies reporter + kind combination
+  config = options.aether?.options?.problems?[id] or {}  # Default problem level/message/hint overrides
+
+  p = isUserCodeProblem: true
+  p.id = id
+  p.level = config.level or options.level or 'error'  # 'error', 'warning', 'info'
+  p.type = options.type or 'generic'  # Like 'runtime' or 'transpile', maybe later 'lint'
+  p.message = config.message or options.message or "Unknown #{p.type} #{p.level}"  # Main error message (short phrase)
+  p.hint = config.hint or options.hint or ''  # Additional details about error message (sentence)
+  p.range = options.range  # Like [{ofs: 305, row: 15, col: 15}, {ofs: 312, row: 15, col: 22}], or null
+  p.userInfo = options.userInfo ? {}  # Record extra information with the error here
+  p
+
+
+# Transpile Errors
+
+extractTranspileErrorDetails = (options) ->
+  code = options.code or ''
+  codePrefix = options.codePrefix or ''
+  error = options.error
+  options.message = error.message
+
+  originalLines = code.slice(codePrefix.length).split '\n'
+  lineOffset = codePrefix.split('\n').length - 1
+
+  # TODO: move these into language-specific plugins
+  switch options.reporter
+    when 'jshint'
+      options.message ?= error.reason
+      options.kind ?= error.code
+
+      # TODO: Put this transpile error hint creation somewhere reasonable
+      if doubleVar = options.message.match /'([\w]+)' is already defined\./
+        # TODO: Check that it's a var and not a function
+        options.hint = "Don't use the 'var' keyword for '#{doubleVar[1]}' the second time."
+
+      unless options.level
+        options.level = {E: 'error', W: 'warning', I: 'info'}[error.code[0]]
+      line = error.line - codePrefix.split('\n').length
+      if line >= 0
+        if error.evidence?.length
+          startCol = originalLines[line].indexOf error.evidence
+          endCol = startCol + error.evidence.length
         else
-          # TODO: if we type an unmatched {, for example, then it thinks that line -2's function wrapped() { is unmatched...
-          @ranges = [[[0, 0], [originalLines.length - 1, originalLines[originalLines.length - 1].length - 1]]]
-      when 'esprima'
-        @message = error.message
-        # TODO: column range should extend to whole token. Mod Esprima, or extend to end of line?
-        @ranges = [[[error.lineNumber - 1 - lineOffset, error.column - 1], [error.lineNumber - 1 - lineOffset, error.column]]]
-      when 'aether'
-        @message = error.message if error.message
-        # TODO: figure out how to do ranges here
+          [startCol, endCol] = [0, originalLines[line].length - 1]
+        # TODO: no way this works; what am I doing with code prefixes?
+        options.range = [ranges.rowColToPos(line, startCol, code, codePrefix),
+                         ranges.rowColToPos(line, endCol, code, codePrefix)]
       else
-        console.log "Unhandled UserCodeProblem reporter", reporter
-        @message = error.message if error.message
+        # TODO: if we type an unmatched {, for example, then it thinks that line -2's function wrapped() { is unmatched...
+        # TODO: no way this works; what am I doing with code prefixes?
+        options.range = [ranges.offsetToPos(0, code, codePrefix),
+                         ranges.offsetToPos(code.length - 1, code, codePrefix)]
+    when 'esprima'
+      # TODO: column range should extend to whole token. Mod Esprima, or extend to end of line?
+      # TODO: no way this works; what am I doing with code prefixes?
+      options.range = [ranges.rowColToPos(error.lineNumber - 1 - lineOffset, error.column - 1, code, codePrefix),
+                       ranges.rowColToPos(error.lineNumber - 1 - lineOffset, error.column, code, codePrefix)]
+    when 'acorn_loose'
+      null
+    when 'csredux'
+      options.range = [ranges.rowColToPos(error.lineNumber - 1 - lineOffset, error.column - 1, code, codePrefix),
+                       ranges.rowColToPos(error.lineNumber - 1 - lineOffset, error.column, code, codePrefix)]
+    when 'aether'
+      null
+    when 'closer'
+      if error.startOffset and error.endOffset
+        range = ranges.offsetsToRange(error.startOffset, error.endOffset, code)
+        options.range = [range.start, range.end]
+    when 'lua2js'
+      options.message ?= error.message
+      rng = ranges.offsetsToRange(error.offset, error.offset, code, '')
+      options.range = [rng.start, rng.end]
+    when 'filbert'
+      if error.loc
+        columnOffset = 0
+        columnOffset++ while originalLines[lineOffset - 2][columnOffset] is ' '
+        # filbert lines are 1-based, columns are 0-based
+        row = error.loc.line - lineOffset - 1
+        col = error.loc.column - columnOffset
+        start = ranges.rowColToPos(row, col, code, codePrefix)
+        end = ranges.rowColToPos(row, col + error.raisedAt - error.pos, code, codePrefix)
+        # Remove per-row indents
+        start.ofs -= row * 4
+        end.ofs -= row * 4
+        options.range = [start, end]
 
-# {ranges: [[[22, 1], [22, 13]], [[15, 1], [15, 18]], [[18, 1], [18, 14]]], id: 'ArgumentError', message: '`getNearestEnemy()` should return a `Thang` or `null`, not a string (`"Goreball"`).', hint: 'You returned `nearestEnemy`, which had value `"Goreball"`. Check lines 15 and 18 for mistakes setting `nearestEnemy`.', level: "error", callNumber: 118, statementNumber: 25, userInfo: {frameNumber: 25} }
-module.exports.RuntimeProblem = class RuntimeProblem extends UserCodeProblem
-  constructor: (aether, error, @userInfo) ->
-    kind = error.name  # Will this pick up: [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError, DOMException] ?
-    super aether, 'runtime', kind
-    @type = 'runtime'
-    @userInfo ?= {}
-    @message = RuntimeProblem.explainErrorMessage error  # TODO: this should be done with configurable rules
-    @ranges = RuntimeProblem.getAnonymousErrorRanges error  # later this will go away because we'll instrument all the statements
-    if @ranges?.length
-      console.log "Runtime problem got ranges:", @ranges
-      lineNumber = @ranges[0][0][0]
-      if @message.search(/^Line \d+/) != -1
-        @message = @message.replace /^Line \d+/, (match, n) => "Line #{lineNumber}"
+        errorContext = options.problemContext or options.aether?.options?.problemContext
+        languageID = options.aether?.options?.language
+        options.hint = error.hint or getTranspileHint options.message, errorContext, languageID, options.aether.raw, options.range, options.aether.options?.simpleLoops
+    when 'iota'
+      null
+    else
+      console.warn "Unhandled UserCodeProblem reporter", options.reporter
+
+  options
+
+getTranspileHint = (msg, context, languageID, code, range, simpleLoops=false) ->
+  # TODO: Only used by Python currently
+  # TODO: JavaScript blocked by jshint range bug: https://github.com/codecombat/aether/issues/113
+  if msg is "Unterminated string constant" and range?
+    codeSnippet = code.substring range[0].ofs, range[1].ofs
+    # Trim codeSnippet so we can construct the correct suggestion with an ending quote
+    if codeSnippet.length > 0 and codeSnippet[0] in ["'", '"']
+      quoteCharacter = codeSnippet[0]
+      codeSnippet = codeSnippet.slice(1)
+      codeSnippet = codeSnippet.substring 0, nonAlphNumMatch.index if nonAlphNumMatch = codeSnippet.match /[^\w]/
+      return "Missing a quotation mark. Try `#{quoteCharacter}#{codeSnippet}#{quoteCharacter}`"
+
+  else if msg is "Unexpected indent"
+    if range?
+      index = range[0].ofs
+      index-- while index > 0 and /\s/.test(code[index])
+      if index >= 3 and /else/.test(code.substring(index - 3, index + 1))
+        return "You are missing a ':' after 'else'. Try `else:`"
+    return "Code needs to line up."
+    
+  else if msg.indexOf("Unexpected token") >= 0 and context?
+    codeSnippet = code.substring range[0].ofs, range[1].ofs
+    lineStart = code.substring range[0].ofs - range[0].col, range[0].ofs
+    lineStartLow = lineStart.toLowerCase()
+    # console.log "Aether transpile problem codeSnippet='#{codeSnippet}' lineStart='#{lineStart}'"
+
+    # Check for extra thisValue + space at beginning of line
+    # E.g. 'self self.moveRight()'
+    hintCreator = new HintCreator context, languageID
+    if lineStart.indexOf(hintCreator.thisValue) is 0 and lineStart.trim().length < lineStart.length
+      # TODO: update error range so this extra bit is highlighted
+      if codeSnippet.indexOf(hintCreator.thisValue) is 0
+        return "Delete extra `#{hintCreator.thisValue}`"
       else
-        @message = "Line #{lineNumber}: #{@message}"
+        return hintCreator.getReferenceErrorHint codeSnippet
 
-  @getAnonymousErrorRanges: (error) ->
-    # Cross-browser stack trace libs like TraceKit throw away the eval line number, as it's inline with another line number. And only Chrome gives the anonymous line number. So we don't actually need a cross-browser solution.
-    return [[[error.lineNumber, error.column], [error.lineNumber, error.column + 1]]] if error.lineNumber  # useful?
-    stack = error.stack
-    return null unless stack
-    lines = stack.split('\n')
-    for line, i in lines
-      continue unless line.indexOf("Object.eval") != -1
-      lineNumber = line.match(/<anonymous>:(\d+):/)?[1]
-      column = line.match(/<anonymous>:\d+:(\d+)/)?[1]
-      lineNumber = parseInt lineNumber if lineNumber?
-      column = parseInt column if column?
-      chromeVersion = parseInt navigator?.appVersion?.match(/Chrome\/(\d+)\./)[1] or "28", 10
-      if chromeVersion >= 28
-        lineNumber -= 1  # Apparently the indexing has changed in version 28
-      #console.log "Parsed", lineNumber, column, "from stack", stack
-      return [[[lineNumber, column], [lineNumber, column + 1]]]
-    #console.log "Couldn't parse stack:", stack
-    return null
+    # Check for two commands on a single line with no semi-colon
+    # E.g. "self.moveRight()self.moveDown()"
+    # Check for problems following a ')'
+    prevIndex = range[0].ofs - 1
+    prevIndex-- while prevIndex >= 0 and /[\t ]/.test(code[prevIndex])
+    if prevIndex >= 0 and code[prevIndex] is ')'
+      if codeSnippet is ')'
+        return "Delete extra `)`"
+      else if not /^\s*$/.test(codeSnippet)
+        return "Put each command on a separate line"
 
-  @explainErrorMessage: (error) ->
-    m = error.toString()  # or maybe error.message?
-    if m is "RangeError: Maximum call stack size exceeded"
-      m += ". (Did you use call a function recursively?)"
+    parens = 0
+    parens += (if c is '(' then 1 else if c is ')' then -1 else 0) for c in lineStart
+    return "Your parentheses must match." unless parens is 0
 
-    missingMethodMatch = m.match /has no method '(.*?)'/
-    if missingMethodMatch
-      method = missingMethodMatch[1]
-      [closestMatch, closestMatchScore] = ['Murgatroyd Kerfluffle', 0]
-      explained = false
-      for commonMethod in commonMethods
-        if method is commonMethod
-          m += ". (#{missingMethodMatch[1]} not available in this challenge.)"
-          explained = true
-          break
-        else if method.toLowerCase() is commonMethod.toLowerCase()
-          m = "#{method} should be #{commonMethod} because JavaScript is case-sensitive."
-          explained = true
-          break
-        else
-          matchScore = string_score?.score commonMethod, method, 0.5
-          if matchScore > closestMatchScore
-            [closestMatch, closestMatchScore] = [commonMethod, matchScore]
-      unless explained
-        if closestMatchScore > 0.25
-          m += ". (Did you mean #{closestMatch}?)"
+    # Check for uppercase loop
+    # TODO: Should get 'loop' from problem context
+    if simpleLoops and codeSnippet is ':' and lineStart isnt lineStartLow and lineStartLow is 'loop'
+      return "Should be lowercase. Try `loop`"
 
-      m = m.replace 'TypeError:', 'Error:'
+    # Check for malformed if statements
+    if /^\s*if /.test(lineStart)
+      if codeSnippet is ':'
+        return "Your if statement is missing a test clause. Try `if True:`"
+      else if /^\s*$/.test(codeSnippet)
+        # TODO: Upate error range to be around lineStart in this case
+        return "You are missing a ':' after '#{lineStart}'. Try `#{lineStart}:`"
 
-    m
+    # Catchall hint for 'Unexpected token' error
+    if /Unexpected token/.test(msg)
+      return "Please double-check your code carefully."
 
-module.exports.commonMethods = commonMethods = ['moveRight', 'moveLeft', 'moveUp', 'moveDown', 'attackNearbyEnemy', 'say', 'move', 'attackNearestEnemy', 'shootAt', 'rotateTo', 'shoot', 'distance', 'getNearestEnemy', 'getEnemies', 'attack', 'setAction', 'setTarget', 'getFriends', 'patrol']  # TODO: should be part of user configuration
+# Runtime Errors
 
+extractRuntimeErrorDetails = (options) ->
+  # NOTE: lastStatementRange set via instrumentation.logStatementStart(originalNode.originalRange)
+  options.range ?= options.aether?.lastStatementRange
+  if error = options.error
+    options.kind ?= error.name  # I think this will pick up [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError, DOMException]
+    options.message = error.message or error.toString()
+    options.hint = error.hint or getRuntimeHint options
+    options.level ?= error.level
+    options.userInfo ?= error.userInfo
+  if options.range
+    lineNumber = options.range[0].row + 1
+    if options.message.search(/^Line \d+/) != -1
+      options.message = options.message.replace /^Line \d+/, (match, n) -> "Line #{lineNumber}"
+    else
+      options.message = "Line #{lineNumber}: #{options.message}"
 
+getRuntimeHint = (options) ->
+  code = options.aether.raw or ''
+  context = options.problemContext or options.aether.options?.problemContext
+  languageID = options.aether.options?.language
+  simpleLoops = options.aether.options?.simpleLoops
 
-module.exports.problems = problems =
-  # TODO: the values here should be something else...
-  unknown_Unknown: {message: "Unknown problem.", level: "error"}
+  # Check stack overflow
+  return "Did you call a function recursively?" if options.message is "RangeError: Maximum call stack size exceeded"
 
-  # Based on Esprima Harmony's error messages, which track V8's
-  # https://github.com/ariya/esprima/blob/harmony/esprima.js#L194
-  esprima_UnexpectedToken: {message: 'Unexpected token %0', level: "error"}
-  esprima_UnexpectedNumber: {message: 'Unexpected number', level: "error"}
-  esprima_UnexpectedString: {message: 'Unexpected string', level: "error"}
-  esprima_UnexpectedIdentifier: {message: 'Unexpected identifier', level: "error"}
-  esprima_UnexpectedReserved: {message: 'Unexpected reserved word', level: "error"}
-  esprima_UnexpectedTemplate: {message: 'Unexpected quasi %0', level: "error"}
-  esprima_UnexpectedEOS: {message: 'Unexpected end of input', level: "error"}
-  esprima_NewlineAfterThrow: {message: 'Illegal newline after throw', level: "error"}
-  esprima_InvalidRegExp: {message: 'Invalid regular expression', level: "error"}
-  esprima_UnterminatedRegExp: {message: 'Invalid regular expression: missing /', level: "error"}
-  esprima_InvalidLHSInAssignment: {message: 'Invalid left-hand side in assignment', level: "error"}
-  esprima_InvalidLHSInFormalsList: {message: 'Invalid left-hand side in formals list', level: "error"}
-  esprima_InvalidLHSInForIn: {message: 'Invalid left-hand side in for-in', level: "error"}
-  esprima_MultipleDefaultsInSwitch: {message: 'More than one default clause in switch statement', level: "error"}
-  esprima_NoCatchOrFinally: {message: 'Missing catch or finally after try', level: "error"}
-  esprima_UnknownLabel: {message: 'Undefined label \'%0\'', level: "error"}
-  esprima_Redeclaration: {message: '%0 \'%1\' has already been declared', level: "error"}
-  esprima_IllegalContinue: {message: 'Illegal continue statement', level: "error"}
-  esprima_IllegalBreak: {message: 'Illegal break statement', level: "error"}
-  esprima_IllegalDuplicateClassProperty: {message: 'Illegal duplicate property in class definition', level: "error"}
-  esprima_IllegalReturn: {message: 'Illegal return statement', level: "error"}
-  esprima_IllegalYield: {message: 'Illegal yield expression', level: "error"}
-  esprima_IllegalSpread: {message: 'Illegal spread element', level: "error"}
-  esprima_StrictModeWith: {message: 'Strict mode code may not include a with statement', level: "error"}
-  esprima_StrictCatchVariable: {message: 'Catch variable may not be eval or arguments in strict mode', level: "error"}
-  esprima_StrictVarName: {message: 'Variable name may not be eval or arguments in strict mode', level: "error"}
-  esprima_StrictParamName: {message: 'Parameter name eval or arguments is not allowed in strict mode', level: "error"}
-  esprima_StrictParamDupe: {message: 'Strict mode function may not have duplicate parameter names', level: "error"}
-  esprima_ParameterAfterRestParameter: {message: 'Rest parameter must be final parameter of an argument list', level: "error"}
-  esprima_DefaultRestParameter: {message: 'Rest parameter can not have a default value', level: "error"}
-  esprima_ElementAfterSpreadElement: {message: 'Spread must be the final element of an element list', level: "error"}
-  esprima_ObjectPatternAsRestParameter: {message: 'Invalid rest parameter', level: "error"}
-  esprima_ObjectPatternAsSpread: {message: 'Invalid spread argument', level: "error"}
-  esprima_StrictFunctionName: {message: 'Function name may not be eval or arguments in strict mode', level: "error"}
-  esprima_StrictOctalLiteral: {message: 'Octal literals are not allowed in strict mode.', level: "error"}
-  esprima_StrictDelete: {message: 'Delete of an unqualified identifier in strict mode.', level: "error"}
-  esprima_StrictDuplicateProperty: {message: 'Duplicate data property in object literal not allowed in strict mode', level: "error"}
-  esprima_AccessorDataProperty: {message: 'Object literal may not have data and accessor property with the same name', level: "error"}
-  esprima_AccessorGetSet: {message: 'Object literal may not have multiple get/set accessors with the same name', level: "error"}
-  esprima_StrictLHSAssignment: {message: 'Assignment to eval or arguments is not allowed in strict mode', level: "error"}
-  esprima_StrictLHSPostfix: {message: 'Postfix increment/decrement may not have eval or arguments operand in strict mode', level: "error"}
-  esprima_StrictLHSPrefix: {message: 'Prefix increment/decrement may not have eval or arguments operand in strict mode', level: "error"}
-  esprima_StrictReservedWord: {message: 'Use of future reserved word in strict mode', level: "error"}
-  esprima_NewlineAfterModule: {message: 'Illegal newline after module', level: "error"}
-  esprima_NoFromAfterImport: {message: 'Missing from after import', level: "error"}
-  esprima_InvalidModuleSpecifier: {message: 'Invalid module specifier', level: "error"}
-  esprima_NestedModule: {message: 'Module declaration can not be nested', level: "error"}
-  esprima_NoYieldInGenerator: {message: 'Missing yield in generator', level: "error"}
-  esprima_NoUnintializedConst: {message: 'Const must be initialized', level: "error"}
-  esprima_ComprehensionRequiresBlock: {message: 'Comprehension must have at least one block', level: "error"}
-  esprima_ComprehensionError: {message: 'Comprehension Error', level: "error"}
-  esprima_EachNotAllowed: {message: 'Each is not supported', level: "error"}
+  # Check loop ReferenceError
+  if simpleLoops and languageID is 'python' and /ReferenceError: loop is not defined/.test options.message
+    # TODO: move this language-specific stuff to language-specific code
+    if options.range?
+      index = options.range[1].ofs
+      index++ while index < code.length and /[^\n:]/.test code[index]
+      hint = "You are missing a ':' after 'loop'. Try `loop:`" if index >= code.length or code[index] is '\n'
+    else
+      hint = "Are you missing a ':' after 'loop'? Try `loop:`"
+    return hint
 
-  # Errors: things that will error out and thus prevent us from compiling the code (syntax errors, missing variables, typos)
-  aether_UnexpectedIdentifier: {message: 'UnexpectedIdentifier', level: 'error'}
-  aether_MissingVarKeyword: {message: 'MissingVarKeyword', level: 'error'}
-  aether_UndefinedVariable: {message: 'UndefinedVariable', level: 'error'}
-  aether_MissingThis: {message: 'Missing `this.` keyword.', level: 'error'}
-  # ... many more errors ...
+  # Use problemContext to add hints
+  return unless context?
+  hintCreator = new HintCreator context, languageID
+  hintCreator.getHint options.message, code, options.range
 
-  # Warnings: things that we think might cause runtime errors or bugs, but aren't sure (statements that don't do anything, variables which are defined and not used, weird operator precedence issues, etc.)
-  aether_NoEffect: {message: 'NoEffect', level: 'warning'}
-  aether_FalseBlockIndentation: {message: 'FalseBlockIndentation', level: 'warning'}
-  aether_UndefinedProperty: {message: 'UndefinedProperty', level: 'warning'}
-  # ... many more warnings ...
+class HintCreator
+  # Create hints for an error message based on a problem context
+  # TODO: better class name, move this to a separate file
 
-  # Info: things that are usually bad code (missing semicolons, bad indentation, multiple statements on a line, for..in loops where we think they're doing arrays, really long lines, bad_case_conventions)
-  aether_InconsistentIndentation: {message: 'InconsistentIndentation', level: 'info'}
-  aether_SnakeCase: {message: 'SnakeCase', level: 'info'}
-  # ... many more infos ...
+  constructor: (context, languageID) ->
+    # TODO: move this language-specific stuff to language-specific code
+    @thisValue = switch languageID
+      when 'python' then 'self'
+      when 'cofeescript' then '@'
+      else 'this'
+    @thisValueAccess = switch languageID
+      when 'python' then 'self.'
+      when 'cofeescript' then '@'
+      else 'this.'
+    @methodRegex = switch languageID
+      when 'python' then new RegExp "self\\.(\\w+)\\s*\\("
+      when 'cofeescript' then new RegExp "@(\\w+)\\s*\\("
+      else new RegExp "this\\.(\\w+)\\("
+    @context = context ? {}
 
-  aether_SingleQuotes: {message: 'SingleQuotes', level: "ignore"}
-  aether_DoubleQuotes: {message: 'DoubleQuotes', level: "ignore"}
-  aether_CamelCase: {message: 'CamelCase', level: 'ignore'}
-  # ... many more problems ignored by default ...
+  getHint: (msg, code, range) ->
+    return unless @context?
+    if (missingMethodMatch = msg.match(/has no method '(.*?)'/)) or msg.match(/is not a function/) or msg.match(/has no method/)
+      # NOTE: We only get this for valid thisValue and parens: self.blahblah()
+      # NOTE: We get different error messages for this based on javascript engine:
+      # Chrome: 'undefined is not a function'
+      # Firefox: 'tmp5[tmp6] is not a function'
+      # test framework: 'Line 1: Object #<Object> has no method 'moveright'
+      if missingMethodMatch
+        target = missingMethodMatch[1]
+      else if range?
+        # TODO: this is not covered by any test cases yet, because our test environment throws different errors
+        codeSnippet = code.substring range[0].ofs, range[1].ofs
+        missingMethodMatch = @methodRegex.exec codeSnippet
+        target = missingMethodMatch[1] if missingMethodMatch?
+      hint = if target? then @getNoFunctionHint target
+    else if missingReference = msg.match /ReferenceError: ([^\s]+) is not defined/
+      hint = @getReferenceErrorHint missingReference[1]
+    else if missingProperty = msg.match /Cannot (?:read|call) (?:property|method) '([\w]+)' of (?:undefined|null)/
+      # Chrome: "Cannot read property 'moveUp' of undefined"
+      # TODO: Firefox: "tmp5 is undefined"
+      hint = @getReferenceErrorHint missingProperty[1]
 
-  # JSHint's error and warning messages
-  # https://github.com/jshint/jshint/blob/master/src/messages.js
+      # Chrome: "Cannot read property 'pos' of null"
+      # TODO: Firefox: "tmp10 is null"
+      # TODO: range is pretty busted, but row seems ok so we'll use that.
+      # TODO: Should we use a different message if object was 'undefined' instead of 'null'?
+      if not hint? and range?
+        line = code.substring range[0].ofs - range[0].col, code.indexOf('\n', range[1].ofs)
+        nullObjRegex = new RegExp "(\\w+)\\.#{missingProperty[1]}"
+        if nullObjMatch = nullObjRegex.exec line
+          hint = "'#{nullObjMatch[1]}' was null. Use a null check before accessing properties. Try `if #{nullObjMatch[1]}:`"
+    hint
 
-  # JSHint errors
-  jshint_E001: {message: "Bad option: '{a}'.", level: "error"}
-  jshint_E002: {message: "Bad option value.", level: "error"}
+  getNoFunctionHint: (target) ->
+    # Check thisMethods
+    hint = @getNoCaseMatch target, @context.thisMethods, (match) =>
+      # TODO: Remove these format tests someday.
+      # "Uppercase or lowercase problem. Try #{@thisValueAccess}#{match}()"
+      # "Uppercase or lowercase problem.  \n  \n\tTry: #{@thisValueAccess}#{match}()  \n\tHad: #{codeSnippet}"
+      # "Uppercase or lowercase problem.  \n  \nTry:  \n`#{@thisValueAccess}#{match}()`  \n  \nInstead of:  \n`#{codeSnippet}`"
+      "Uppercase or lowercase problem. Try `#{@thisValueAccess}#{match}()`"
+    hint ?= @getScoreMatch target, [candidates: @context.thisMethods, msgFormatFn: (match) =>
+      "Try `#{@thisValueAccess}#{match}()`"]
+    # Check commonThisMethods
+    hint ?= @getExactMatch target, @context.commonThisMethods, (match) ->
+      "You do not have an item equipped with the #{match} skill."
+    hint ?= @getNoCaseMatch target, @context.commonThisMethods, (match) ->
+      "Did you mean #{match}? You do not have an item equipped with that skill."
+    hint ?= @getScoreMatch target, [candidates: @context.commonThisMethods, msgFormatFn: (match) ->
+      "Did you mean #{match}? You do not have an item equipped with that skill."]
+    hint ?= "You don't have a `#{target}` method."
+    hint
 
-  # JSHint input
-  jshint_E003: {message: "Expected a JSON value.", level: "error"}
-  jshint_E004: {message: "Input is neither a string nor an array of strings.", level: "error"}
-  jshint_E005: {message: "Input is empty.", level: "error"}
-  jshint_E006: {message: "Unexpected early end of program.", level: "error"}
+  getReferenceErrorHint: (target) ->
+    # Check missing quotes
+    hint = @getExactMatch target, @context.stringReferences, (match) ->
+      "Missing quotes. Try `\"#{match}\"`"
+    # Check this props
+    hint ?= @getExactMatch target, @context.thisMethods, (match) =>
+      "Try `#{@thisValueAccess}#{match}()`"
+    hint ?= @getExactMatch target, @context.thisProperties, (match) =>
+      "Try `#{@thisValueAccess}#{match}`"
+    # Check case-insensitive, quotes, this props
+    if not hint? and target.toLowerCase() is @thisValue.toLowerCase()
+      hint = "Uppercase or lowercase problem. Try `#{@thisValue}`"
+    hint ?= @getNoCaseMatch target, @context.stringReferences, (match) ->
+      "Missing quotes.  Try `\"#{match}\"`"
+    hint ?= @getNoCaseMatch target, @context.thisMethods, (match) =>
+      "Try `#{@thisValueAccess}#{match}()`"
+    hint ?= @getNoCaseMatch target, @context.thisProperties, (match) =>
+      "Try `#{@thisValueAccess}#{match}`"
+    # Check score match, quotes, this props
+    hint ?= @getScoreMatch target, [
+      {candidates: [@thisValue], msgFormatFn: (match) -> "Try `#{match}`"},
+      {candidates: @context.stringReferences, msgFormatFn: (match) -> "Missing quotes. Try `\"#{match}\"`"},
+      {candidates: @context.thisMethods, msgFormatFn: (match) => "Try `#{@thisValueAccess}#{match}()`"},
+      {candidates: @context.thisProperties, msgFormatFn: (match) => "Try `#{@thisValueAccess}#{match}`"}]
+    # Check commonThisMethods
+    hint ?= @getExactMatch target, @context.commonThisMethods, (match) ->
+      "You do not have an item equipped with the #{match} skill."
+    hint ?= @getNoCaseMatch target, @context.commonThisMethods, (match) ->
+      "Did you mean #{match}? You do not have an item equipped with that skill."
+    hint ?= @getScoreMatch target, [candidates: @context.commonThisMethods, msgFormatFn: (match) ->
+      "Did you mean #{match}? You do not have an item equipped with that skill."]
 
-  # Strict mode
-  jshint_E007: {message: "Missing \"use strict\" statement.", level: "error"}
-  jshint_E008: {message: "Strict violation.", level: "error"}
-  jshint_E009: {message: "Option 'validthis' can't be used in a global scope.", level: "error"}
-  jshint_E010: {message: "'with' is not allowed in strict mode.", level: "error"}
+    # Try score match with this value prefixed
+    # E.g. target = 'selfmoveright', try 'self.moveRight()''
+    if not hint? and @context?.thisMethods?
+      thisPrefixed = (@thisValueAccess + method for method in @context.thisMethods)
+      hint = @getScoreMatch target, [candidates: thisPrefixed, msgFormatFn: (match) ->
+        "Try `#{match}()`"]
+    hint
 
-  # Constants
-  jshint_E011: {message: "const '{a}' has already been declared.", level: "error"}
-  jshint_E012: {message: "const '{a}' is initialized to 'undefined'.", level: "error"}
-  jshint_E013: {message: "Attempting to override '{a}' which is a constant.", level: "error"}
+  getExactMatch: (target, candidates, msgFormatFn) ->
+    return unless candidates?
+    msgFormatFn target if target in candidates
 
-  # Regular expressions
-  jshint_E014: {message: "A regular expression literal can be confused with '/='.", level: "error"}
-  jshint_E015: {message: "Unclosed regular expression.", level: "error"}
-  jshint_E016: {message: "Invalid regular expression.", level: "error"}
+  getNoCaseMatch: (target, candidates, msgFormatFn) ->
+    return unless candidates?
+    candidatesLow = (s.toLowerCase() for s in candidates)
+    msgFormatFn candidates[index] if (index = candidatesLow.indexOf target.toLowerCase()) >= 0
 
-  # Tokens
-  jshint_E017: {message: "Unclosed comment.", level: "error"}
-  jshint_E018: {message: "Unbegun comment.", level: "error"}
-  jshint_E019: {message: "Unmatched '{a}'.", level: "error"}
-  jshint_E020: {message: "Expected '{a}' to match '{b}' from line {c} and instead saw '{d}'.", level: "error"}
-  jshint_E021: {message: "Expected '{a}' and instead saw '{b}'.", level: "error"}
-  jshint_E022: {message: "Line breaking error '{a}'.", level: "error"}
-  jshint_E023: {message: "Missing '{a}'.", level: "error"}
-  jshint_E024: {message: "Unexpected '{a}'.", level: "error"}
-  jshint_E025: {message: "Missing ':' on a case clause.", level: "error"}
-  jshint_E026: {message: "Missing '}' to match '{' from line {a}.", level: "error"}
-  jshint_E027: {message: "Missing ']' to match '[' form line {a}.", level: "error"}
-  jshint_E028: {message: "Illegal comma.", level: "error"}
-  jshint_E029: {message: "Unclosed string.", level: "error"}
-
-  # Everything else
-  jshint_E030: {message: "Expected an identifier and instead saw '{a}'.", level: "error"}
-  jshint_E031: {message: "Bad assignment.", level: "error"}
-  jshint_E032: {message: "Expected a small integer or 'false' and instead saw '{a}'.", level: "error"}
-  jshint_E033: {message: "Expected an operator and instead saw '{a}'.", level: "error"}
-  jshint_E034: {message: "get/set are ES5 features.", level: "error"}
-  jshint_E035: {message: "Missing property name.", level: "error"}
-  jshint_E036: {message: "Expected to see a statement and instead saw a block.", level: "error"}
-  #jshint_E037: null   # Vacant
-  #jshint_E038: null   # Vacant
-  jshint_E039: {message: "Function declarations are not invocable. Wrap the whole function invocation in parens.", level: "error"}
-  jshint_E040: {message: "Each value should have its own case label.", level: "error"}
-  jshint_E041: {message: "Unrecoverable syntax error.", level: "error"}
-  jshint_E042: {message: "Stopping.", level: "error"}
-  jshint_E043: {message: "Too many errors.", level: "error"}
-  jshint_E044: {message: "'{a}' is already defined and can't be redefined.", level: "error"}
-  jshint_E045: {message: "Invalid for each loop.", level: "error"}
-  jshint_E046: {message: "A yield statement shall be within a generator function (with syntax: `function*`)", level: "error"}
-  jshint_E047: {message: "A generator function shall contain a yield statement.", level: "error"}
-  jshint_E048: {message: "Let declaration not directly within block.", level: "error"}
-  jshint_E049: {message: "A {a} cannot be named '{b}'.", level: "error"}
-  jshint_E050: {message: "Mozilla requires the yield expression to be parenthesized here.", level: "error"}
-  jshint_E051: {message: "Regular parameters cannot come after default parameters.", level: "error"}
-
-  # JSHint Warnings
-  jshint_W001: {message: "'hasOwnProperty' is a really bad name.", level: "warning"}
-  jshint_W002: {message: "Value of '{a}' may be overwritten in IE 8 and earlier.", level: "warning"}
-  jshint_W003: {message: "'{a}' was used before it was defined.", level: "warning"}
-  jshint_W004: {message: "'{a}' is already defined.", level: "warning"}
-  jshint_W005: {message: "A dot following a number can be confused with a decimal point.", level: "warning"}
-  jshint_W006: {message: "Confusing minuses.", level: "warning"}
-  jshint_W007: {message: "Confusing pluses.", level: "warning"}
-  jshint_W008: {message: "A leading decimal point can be confused with a dot: '{a}'.", level: "warning"}
-  jshint_W009: {message: "The array literal notation [] is preferrable.", level: "warning"}
-  jshint_W010: {message: "The object literal notation {} is preferrable.", level: "warning"}
-  jshint_W011: {message: "Unexpected space after '{a}'.", level: "warning"}
-  jshint_W012: {message: "Unexpected space before '{a}'.", level: "warning"}
-  jshint_W013: {message: "Missing space after '{a}'.", level: "warning"}
-  jshint_W014: {message: "Bad line breaking before '{a}'.", level: "warning"}
-  jshint_W015: {message: "Expected '{a}' to have an indentation at {b} instead at {c}.", level: "warning"}
-  jshint_W016: {message: "Unexpected use of '{a}'.", level: "warning"}
-  jshint_W017: {message: "Bad operand.", level: "warning"}
-  jshint_W018: {message: "Confusing use of '{a}'.", level: "warning"}
-  jshint_W019: {message: "Use the isNaN function to compare with NaN.", level: "warning"}
-  jshint_W020: {message: "Read only.", level: "warning"}
-  jshint_W021: {message: "'{a}' is a function.", level: "warning"}
-  jshint_W022: {message: "Do not assign to the exception parameter.", level: "warning"}
-  jshint_W023: {message: "Expected an identifier in an assignment and instead saw a function invocation.", level: "warning"}
-  jshint_W024: {message: "Expected an identifier and instead saw '{a}' (a reserved word).", level: "warning"}
-  jshint_W025: {message: "Missing name in function declaration.", level: "warning"}
-  jshint_W026: {message: "Inner functions should be listed at the top of the outer function.", level: "warning"}
-  jshint_W027: {message: "Unreachable '{a}' after '{b}'.", level: "warning"}
-  jshint_W028: {message: "Label '{a}' on {b} statement.", level: "warning"}
-  jshint_W030: {message: "Expected an assignment or function call and instead saw an expression.", level: "warning"}
-  jshint_W031: {message: "Do not use 'new' for side effects.", level: "warning"}
-  jshint_W032: {message: "Unnecessary semicolon.", level: "warning"}
-  jshint_W033: {message: "Missing semicolon.", level: "warning"}
-  jshint_W034: {message: "Unnecessary directive \"{a}\".", level: "warning"}
-  jshint_W035: {message: "Empty block.", level: "warning"}
-  jshint_W036: {message: "Unexpected /*member '{a}'.", level: "warning"}
-  jshint_W037: {message: "'{a}' is a statement label.", level: "warning"}
-  jshint_W038: {message: "'{a}' used out of scope.", level: "warning"}
-  jshint_W039: {message: "'{a}' is not allowed.", level: "warning"}
-  jshint_W040: {message: "Possible strict violation.", level: "warning"}
-  jshint_W041: {message: "Use '{a}' to compare with '{b}'.", level: "warning"}
-  jshint_W042: {message: "Avoid EOL escaping.", level: "warning"}
-  jshint_W043: {message: "Bad escaping of EOL. Use option multistr if needed.", level: "warning"}
-  jshint_W044: {message: "Bad or unnecessary escaping.", level: "warning"}
-  jshint_W045: {message: "Bad number '{a}'.", level: "warning"}
-  jshint_W046: {message: "Don't use extra leading zeros '{a}'.", level: "warning"}
-  jshint_W047: {message: "A trailing decimal point can be confused with a dot: '{a}'.", level: "warning"}
-  jshint_W048: {message: "Unexpected control character in regular expression.", level: "warning"}
-  jshint_W049: {message: "Unexpected escaped character '{a}' in regular expression.", level: "warning"}
-  jshint_W050: {message: "JavaScript URL.", level: "warning"}
-  jshint_W051: {message: "Variables should not be deleted.", level: "warning"}
-  jshint_W052: {message: "Unexpected '{a}'.", level: "warning"}
-  jshint_W053: {message: "Do not use {a} as a constructor.", level: "warning"}
-  jshint_W054: {message: "The Function constructor is a form of eval.", level: "warning"}
-  jshint_W055: {message: "A constructor name should start with an uppercase letter.", level: "warning"}
-  jshint_W056: {message: "Bad constructor.", level: "warning"}
-  jshint_W057: {message: "Weird construction. Is 'new' unnecessary?", level: "warning"}
-  jshint_W058: {message: "Missing '()' invoking a constructor.", level: "warning"}
-  jshint_W059: {message: "Avoid arguments.{a}.", level: "warning"}
-  jshint_W060: {message: "document.write can be a form of eval.", level: "warning"}
-  jshint_W061: {message: "eval can be harmful.", level: "warning"}
-  jshint_W062: {message: "Wrap an immediate function invocation in parens to assist the reader in understanding that the expression is the result of a function, and not the function itself.", level: "warning"}
-  jshint_W063: {message: "Math is not a function.", level: "warning"}
-  jshint_W064: {message: "Missing 'new' prefix when invoking a constructor.", level: "warning"}
-  jshint_W065: {message: "Missing radix parameter.", level: "warning"}
-  jshint_W066: {message: "Implied eval. Consider passing a function instead of a string.", level: "warning"}
-  jshint_W067: {message: "Bad invocation.", level: "warning"}
-  jshint_W068: {message: "Wrapping non-IIFE function literals in parens is unnecessary.", level: "warning"}
-  jshint_W069: {message: "['{a}'] is better written in dot notation.", level: "warning"}
-  jshint_W070: {message: "Extra comma. (it breaks older versions of IE)", level: "warning"}
-  jshint_W071: {message: "This function has too many statements. ({a})", level: "warning"}
-  jshint_W072: {message: "This function has too many parameters. ({a})", level: "warning"}
-  jshint_W073: {message: "Blocks are nested too deeply. ({a})", level: "warning"}
-  jshint_W074: {message: "This function's cyclomatic complexity is too high. ({a})", level: "warning"}
-  jshint_W075: {message: "Duplicate key '{a}'.", level: "warning"}
-  jshint_W076: {message: "Unexpected parameter '{a}' in get {b} function.", level: "warning"}
-  jshint_W077: {message: "Expected a single parameter in set {a} function.", level: "warning"}
-  jshint_W078: {message: "Setter is defined without getter.", level: "warning"}
-  jshint_W079: {message: "Redefinition of '{a}'.", level: "warning"}
-  jshint_W080: {message: "It's not necessary to initialize '{a}' to 'undefined'.", level: "warning"}
-  jshint_W081: {message: "Too many var statements.", level: "warning"}
-  jshint_W082: {message: "Function declarations should not be placed in blocks. Use a function expression or move the statement to the top of the outer function.", level: "warning"}
-  jshint_W083: {message: "Don't make functions within a loop.", level: "warning"}
-  jshint_W084: {message: "Expected a conditional expression and instead saw an assignment.", level: "warning"}
-  jshint_W085: {message: "Don't use 'with'.", level: "warning"}
-  jshint_W086: {message: "Expected a 'break' statement before '{a}'.", level: "warning"}
-  jshint_W087: {message: "Forgotten 'debugger' statement?", level: "warning"}
-  jshint_W088: {message: "Creating global 'for' variable. Should be 'for (var {a} ...'.", level: "warning"}
-  jshint_W089: {message: "The body of a for in should be wrapped in an if statement to filter unwanted properties from the prototype.", level: "warning"}
-  jshint_W090: {message: "'{a}' is not a statement label.", level: "warning"}
-  jshint_W091: {message: "'{a}' is out of scope.", level: "warning"}
-  jshint_W092: {message: "Wrap the /regexp/ literal in parens to disambiguate the slash operator.", level: "warning"}
-  jshint_W093: {message: "Did you mean to return a conditional instead of an assignment?", level: "warning"}
-  jshint_W094: {message: "Unexpected comma.", level: "warning"}
-  jshint_W095: {message: "Expected a string and instead saw {a}.", level: "warning"}
-  jshint_W096: {message: "The '{a}' key may produce unexpected results.", level: "warning"}
-  jshint_W097: {message: "Use the function form of \"use strict\".", level: "warning"}
-  jshint_W098: {message: "'{a}' is defined but never used.", level: "warning"}
-  jshint_W099: {message: "Mixed spaces and tabs.", level: "warning"}
-  jshint_W100: {message: "This character may get silently deleted by one or more browsers.", level: "warning"}
-  jshint_W101: {message: "Line is too long.", level: "warning"}
-  jshint_W102: {message: "Trailing whitespace.", level: "warning"}
-  jshint_W103: {message: "The '{a}' property is deprecated.", level: "warning"}
-  jshint_W104: {message: "'{a}' is only available in JavaScript 1.7.", level: "warning"}
-  jshint_W105: {message: "Unexpected {a} in '{b}'.", level: "warning"}
-  jshint_W106: {message: "Identifier '{a}' is not in camel case.", level: "warning"}
-  jshint_W107: {message: "Script URL.", level: "warning"}
-  jshint_W108: {message: "Strings must use doublequote.", level: "warning"}
-  jshint_W109: {message: "Strings must use singlequote.", level: "warning"}
-  jshint_W110: {message: "Mixed double and single quotes.", level: "warning"}
-  jshint_W112: {message: "Unclosed string.", level: "warning"}
-  jshint_W113: {message: "Control character in string: {a}.", level: "warning"}
-  jshint_W114: {message: "Avoid {a}.", level: "warning"}
-  jshint_W115: {message: "Octal literals are not allowed in strict mode.", level: "warning"}
-  jshint_W116: {message: "Expected '{a}' and instead saw '{b}'.", level: "warning"}
-  jshint_W117: {message: "'{a}' is not defined.", level: "warning"}
-  jshint_W118: {message: "'{a}' is only available in Mozilla JavaScript extensions (use moz option).", level: "warning"}
-  jshint_W119: {message: "'{a}' is only available in ES6 (use esnext option).", level: "warning"}
-  jshint_W120: {message: "You might be leaking a variable ({a}) here.", level: "warning"}
-
-  # JSHint info?
-  jshint_I001: {message: "Comma warnings can be turned off with 'laxcomma'.", level: "ignore"}
-  jshint_I002: {message: "Reserved words as properties can be used under the 'es5' option.", level: "ignore"}
-  jshint_I003: {message: "ES5 option is now set per default", level: "ignore"}
+  getScoreMatch: (target, candidatesList) ->
+    # candidatesList is an array of candidates objects. E.g. [{candidates: [], msgFormatFn: ()->}, ...]
+    # This allows a score match across multiple lists of candidates (e.g. thisMethods and thisProperties)
+    return unless string_score?
+    [closestMatch, closestScore, msg] = ['', 0, '']
+    for set in candidatesList
+      if set.candidates?
+        for match in set.candidates
+          matchScore = match.score target, scoreFuzziness
+          [closestMatch, closestScore, msg] = [match, matchScore, set.msgFormatFn(match)] if matchScore > closestScore
+    msg if closestScore >= acceptMatchThreshold

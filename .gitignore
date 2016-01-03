@@ -56,3 +56,6 @@ Thumbs.db
 .tmproj
 .idea
 nbproject
+
+.grunt
+coverage/
