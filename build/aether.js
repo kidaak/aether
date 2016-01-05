@@ -21410,7 +21410,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./defaults":2,"./execution":3,"./instrumentation":4,"./languages/languages":10,"./problems":13,"./protectAPI":14,"./protectBuiltins":15,"./transforms":17,"./traversal":18,"./validators/options":19,"JS_WALA/normalizer/lib/normalizer":24,"escodegen":29,"esprima":34,"lodash":36,"traceur":36}],2:[function(require,module,exports){
+},{"./defaults":2,"./execution":3,"./instrumentation":4,"./languages/languages":11,"./problems":14,"./protectAPI":15,"./protectBuiltins":16,"./transforms":18,"./traversal":19,"./validators/options":20,"JS_WALA/normalizer/lib/normalizer":25,"escodegen":30,"esprima":35,"lodash":37,"traceur":37}],2:[function(require,module,exports){
 (function (global){
 (function() {
   var defaults, execution, _, _ref, _ref1, _ref2;
@@ -21442,7 +21442,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./execution":3,"lodash":36}],3:[function(require,module,exports){
+},{"./execution":3,"lodash":37}],3:[function(require,module,exports){
 (function() {
   var execution;
 
@@ -21682,7 +21682,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"lodash":36}],5:[function(require,module,exports){
+},{"lodash":37}],5:[function(require,module,exports){
 (function() {
   var Clojure, Language, callParser, parserHolder,
     __hasProp = {}.hasOwnProperty,
@@ -21785,7 +21785,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{"./language":9,"closer":36}],6:[function(require,module,exports){
+},{"./language":10,"closer":37}],6:[function(require,module,exports){
 (function (global){
 (function() {
   var CoffeeScript, Language, StructuredCode, estraverse, fixLocations, parserHolder, _, _ref, _ref1, _ref2,
@@ -22009,7 +22009,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./language":9,"coffee-script-redux":36,"estraverse":35,"lodash":36}],7:[function(require,module,exports){
+},{"./language":10,"coffee-script-redux":37,"estraverse":36,"lodash":37}],7:[function(require,module,exports){
 (function() {
   var Io, Language, esprima, parserHolder,
     __hasProp = {}.hasOwnProperty,
@@ -22069,7 +22069,141 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{"./language":9,"esprima":34,"iota-compiler":36}],8:[function(require,module,exports){
+},{"./language":10,"esprima":35,"iota-compiler":37}],8:[function(require,module,exports){
+(function() {
+  var Java, Language, heroToThis, parserHolder, pruneMainMethod,
+    __hasProp = {}.hasOwnProperty,
+    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
+
+  Language = require('./language');
+
+  parserHolder = {};
+
+  module.exports = Java = (function(_super) {
+    __extends(Java, _super);
+
+    Java.prototype.name = 'Java';
+
+    Java.prototype.id = 'java';
+
+    Java.prototype.parserID = 'cashew';
+
+    function Java() {
+      var _ref;
+      Java.__super__.constructor.apply(this, arguments);
+      if (parserHolder.cashew == null) {
+        parserHolder.cashew = (_ref = typeof self !== "undefined" && self !== null ? self.aetherCashew : void 0) != null ? _ref : require('cashew-js');
+      }
+      this.runtimeGlobals = {
+        ___JavaRuntime: parserHolder.cashew.___JavaRuntime
+      };
+    }
+
+    Java.prototype.obviouslyCannotTranspile = function(rawCode) {
+      return false;
+    };
+
+    Java.prototype.parse = function(code, aether) {
+      var ast;
+      ast = parserHolder.cashew.Cashew(code);
+      ast = parserHolder.cashew.wrapFunction(ast, aether.options.functionName, aether.className, aether.staticCall);
+      if (aether.options.yieldConditionally || aether.options.yiedAutomatically) {
+        pruneMainMethod(ast, aether);
+      }
+      heroToThis(ast.body[0].body.body);
+      return ast;
+    };
+
+    return Java;
+
+  })(Language);
+
+  pruneMainMethod = function(ast, aether) {
+    var locator, main, target;
+    target = aether.staticCall || 'main';
+    locator = function(node) {
+      var found, n, name, _i, _j, _len, _len1, _ref, _ref1, _ref2;
+      switch (node.type) {
+        case "Program":
+          _ref = node.body;
+          for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+            n = _ref[_i];
+            found = locator(n);
+            if (found) {
+              return found;
+            }
+          }
+          break;
+        case "BlockStatement":
+          _ref1 = node.body;
+          for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
+            n = _ref1[_j];
+            found = locator(n);
+            if (found) {
+              return found;
+            }
+          }
+          break;
+        case "FunctionDeclaration":
+          name = (_ref2 = node.id) != null ? _ref2.name : void 0;
+          return locator(node.body);
+        case "FunctionExpression":
+          return locator(node.body);
+        case "ReturnStatement":
+          return locator(node.argument);
+        case "CallExpression":
+          return locator(node.callee);
+        case "MemberExpression":
+          return locator(node.object);
+        case "ExpressionStatement":
+          return locator(node.expression);
+        case "AssignmentExpression":
+          name = node.left.name;
+          if (name === target) {
+            return node.right;
+          }
+          return locator(node.right);
+      }
+    };
+    main = locator(ast);
+    if (!main) {
+      return ast;
+    }
+    return ast.body = [
+      {
+        type: 'FunctionDeclaration',
+        id: {
+          type: 'Identifier',
+          name: aether.options.functionName || 'foo'
+        },
+        body: main.body,
+        params: []
+      }
+    ];
+  };
+
+  heroToThis = function(body) {
+    return body.unshift({
+      "type": "VariableDeclaration",
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "id": {
+            "type": "Identifier",
+            "name": "hero"
+          },
+          "init": {
+            "type": "ThisExpression"
+          }
+        }
+      ],
+      "kind": "var"
+    });
+  };
+
+}).call(this);
+
+},{"./language":10,"cashew-js":37}],9:[function(require,module,exports){
 (function (global){
 (function() {
   var JavaScript, Language, acorn_loose, escodegen, esprima, jshintHolder, traversal, _, _ref, _ref1, _ref2,
@@ -22377,7 +22511,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../traversal":18,"./language":9,"acorn/acorn_loose":28,"escodegen":29,"esprima":34,"jshint":36,"lodash":36}],9:[function(require,module,exports){
+},{"../traversal":19,"./language":10,"acorn/acorn_loose":29,"escodegen":30,"esprima":35,"jshint":37,"lodash":37}],10:[function(require,module,exports){
 (function (global){
 (function() {
   var Language, _, _ref, _ref1, _ref2;
@@ -22505,7 +22639,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"lodash":36}],10:[function(require,module,exports){
+},{"lodash":37}],11:[function(require,module,exports){
 (function() {
   module.exports = {
     javascript: require('./javascript'),
@@ -22513,12 +22647,13 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
     python: require('./python'),
     clojure: require('./clojure'),
     lua: require('./lua'),
-    io: require('./io')
+    io: require('./io'),
+    java: require('./java')
   };
 
 }).call(this);
 
-},{"./clojure":5,"./coffeescript":6,"./io":7,"./javascript":8,"./lua":11,"./python":12}],11:[function(require,module,exports){
+},{"./clojure":5,"./coffeescript":6,"./io":7,"./java":8,"./javascript":9,"./lua":12,"./python":13}],12:[function(require,module,exports){
 (function() {
   var Language, Lua, parserHolder, ranges,
     __hasProp = {}.hasOwnProperty,
@@ -22724,7 +22859,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{"../ranges":16,"./language":9,"lua2js":36}],12:[function(require,module,exports){
+},{"../ranges":17,"./language":10,"lua2js":37}],13:[function(require,module,exports){
 (function (global){
 (function() {
   var Language, Python, estraverse, parserHolder, selfToThis, _, _ref, _ref1, _ref2,
@@ -23051,7 +23186,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./language":9,"estraverse":35,"filbert":36,"filbert/filbert_loose":36,"lodash":36}],13:[function(require,module,exports){
+},{"./language":10,"estraverse":36,"filbert":37,"filbert/filbert_loose":37,"lodash":37}],14:[function(require,module,exports){
 (function() {
   var HintCreator, acceptMatchThreshold, extractRuntimeErrorDetails, extractTranspileErrorDetails, getRuntimeHint, getTranspileHint, ranges, scoreFuzziness, string_score,
     __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
@@ -23178,6 +23313,9 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
         }
         break;
       case 'iota':
+        null;
+        break;
+      case 'cashew':
         null;
         break;
       default:
@@ -23594,7 +23732,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{"./ranges":16,"string_score":50}],14:[function(require,module,exports){
+},{"./ranges":17,"string_score":51}],15:[function(require,module,exports){
 (function (global){
 (function() {
   var PROTECTION_VERSION, argsClass, arrayClass, boolClass, cloneableClasses, createAPIClone, ctorByClass, dateClass, errorClass, funcClass, numberClass, objectClass, protectionIdCounter, reFlags, regexpClass, restoreAPIClone, stringClass, _, _ref, _ref1, _ref2,
@@ -23820,7 +23958,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"lodash":36}],15:[function(require,module,exports){
+},{"lodash":37}],16:[function(require,module,exports){
 (function (global){
 (function() {
   var addGlobal, addedGlobals, builtinClones, builtinNames, builtinObjectNames, builtinReal, cloneBuiltin, copy, copyBuiltin, createSandboxedFunction, defineProperty, getOwnPropertyDescriptor, getOwnPropertyNames, globalScope, name, problems, raiseDisabledFunctionConstructor, replaceBuiltin, restoreBuiltins, wrapWithSandbox, _, _i, _len, _ref, _ref1, _ref2;
@@ -23996,7 +24134,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./problems":13,"lodash":36}],16:[function(require,module,exports){
+},{"./problems":14,"lodash":37}],17:[function(require,module,exports){
 (function() {
   var buildRowOffsets, lastRowOffsets, lastRowOffsetsPrefix, lastRowOffsetsSource, locToPos, locsToRange, offsetToPos, offsetToRow, offsetsToRange, rowColToPos, rowColsToRange, stringifyPos, stringifyRange;
 
@@ -24130,7 +24268,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 (function (global){
 (function() {
   var S, SourceMap, getFunctionNestingLevel, getImmediateParentOfType, getParents, getParentsOfTypes, getUserFnExpr, getUserFnMap, interceptEval, interceptThis, makeCheckIncompleteMembers, makeCheckThisKeywords, makeFindOriginalNodes, makeGatherNodeRanges, makeIndexWhileLoops, makeInstrumentCalls, makeInstrumentStatements, makeSimpleLoopsYieldAutomatically, makeWhileTrueYieldAutomatically, makeYieldAutomatically, makeYieldConditionally, possiblyGeneratorifyAncestorFunction, possiblyGeneratorifyUserFunction, ranges, statements, _, _ref, _ref1, _ref2,
@@ -25002,7 +25140,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./ranges":16,"esprima":34,"lodash":36,"source-map":39}],18:[function(require,module,exports){
+},{"./ranges":17,"esprima":35,"lodash":37,"source-map":40}],19:[function(require,module,exports){
 (function (global){
 (function() {
   var acorn_loose, esprima, insertHelpers, morphAST, walkAST, _, _ref, _ref1, _ref2;
@@ -25094,7 +25232,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }).call(this);
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"acorn/acorn_loose":28,"esprima":34,"lodash":36}],19:[function(require,module,exports){
+},{"acorn/acorn_loose":29,"esprima":35,"lodash":37}],20:[function(require,module,exports){
 (function() {
   var tv4;
 
@@ -25135,7 +25273,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
           type: 'string',
           description: "Input language",
           minLength: 1,
-          'enum': ['javascript', 'coffeescript', 'python', 'clojure', 'lua', 'io']
+          'enum': ['javascript', 'coffeescript', 'python', 'clojure', 'lua', 'io', 'java']
         },
         languageVersion: {
           oneOf: [
@@ -25210,7 +25348,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 }).call(this);
 
-},{"tv4":51}],20:[function(require,module,exports){
+},{"tv4":52}],21:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -25392,7 +25530,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
     defconstructor(p, signatures[p]);
 //});
 
-},{"./position":21}],21:[function(require,module,exports){
+},{"./position":22}],22:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -25454,7 +25592,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   exports.DUMMY_POS = DUMMY_POS;
 //});
 
-},{}],22:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -25497,7 +25635,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   };
 //});
 
-},{}],23:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -25545,7 +25683,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   exports.getDeclName = getDeclName;
 //});
 
-},{"../../common/lib/ast":20}],24:[function(require,module,exports){
+},{"../../common/lib/ast":21}],25:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -25933,6 +26071,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
             if(nd.left.type === 'Identifier') {
               var res, tmp = null, right;
               var with_bindings = scope.possibleWithBindings(nd.left.name);
+              if ( !nd.left.name ) console.log(nd);
               if(!isTmp(nd.left.name) && scope.isGlobal(nd.left.name)) {
                 tmp = genTmp();
                 right = normalizeExpression(nd.right, getTarget());
@@ -26588,7 +26727,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   exports.normalize = normalize;
 //});
 
-},{"../../common/lib/ast":20,"../../common/lib/position":21,"./cflow":22,"./decls":23,"./scope":25,"./util":26}],25:[function(require,module,exports){
+},{"../../common/lib/ast":21,"../../common/lib/position":22,"./cflow":23,"./decls":24,"./scope":26,"./util":27}],26:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -26717,7 +26856,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   exports.WithScope = WithScope;
 //});
 
-},{"./decls":23}],26:[function(require,module,exports){
+},{"./decls":24}],27:[function(require,module,exports){
 /*******************************************************************************
  * Copyright (c) 2012 IBM Corporation.
  * All rights reserved. This program and the accompanying materials
@@ -26755,7 +26894,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
     Array.prototype.flatmap = flatmap;
 //});
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 // Acorn is a tiny, fast JavaScript parser written in JavaScript.
 //
 // Acorn was written by Marijn Haverbeke and released under an MIT
@@ -28476,7 +28615,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 
 });
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 // Acorn: Loose parser
 //
 // This module provides an alternative parser (`parse_dammit`) that
@@ -29252,7 +29391,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
   }
 });
 
-},{"./acorn":27}],29:[function(require,module,exports){
+},{"./acorn":28}],30:[function(require,module,exports){
 (function (global){
 /*
   Copyright (C) 2012-2013 Yusuke Suzuki <utatane.tea@gmail.com>
@@ -31539,7 +31678,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 /* vim: set sw=4 ts=4 et tw=80 : */
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./package.json":33,"estraverse":35,"esutils":32,"source-map":39}],30:[function(require,module,exports){
+},{"./package.json":34,"estraverse":36,"esutils":33,"source-map":40}],31:[function(require,module,exports){
 /*
   Copyright (C) 2013 Yusuke Suzuki <utatane.tea@gmail.com>
 
@@ -31631,7 +31770,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }());
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 /*
   Copyright (C) 2013 Yusuke Suzuki <utatane.tea@gmail.com>
 
@@ -31750,7 +31889,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }());
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{"./code":30}],32:[function(require,module,exports){
+},{"./code":31}],33:[function(require,module,exports){
 /*
   Copyright (C) 2013 Yusuke Suzuki <utatane.tea@gmail.com>
 
@@ -31784,7 +31923,7 @@ System.get("traceur@0.0.25/src/traceur-import" + '');
 }());
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{"./code":30,"./keyword":31}],33:[function(require,module,exports){
+},{"./code":31,"./keyword":32}],34:[function(require,module,exports){
 module.exports={
   "name": "escodegen",
   "description": "ECMAScript code generator",
@@ -31864,7 +32003,7 @@ module.exports={
   "readme": "ERROR: No README data found!"
 }
 
-},{}],34:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 /*
   Copyright (C) 2013 Ariya Hidayat <ariya.hidayat@gmail.com>
   Copyright (C) 2013 Thaddee Tyl <thaddee.tyl@gmail.com>
@@ -37250,7 +37389,7 @@ module.exports={
 }));
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 /*
   Copyright (C) 2012-2013 Yusuke Suzuki <utatane.tea@gmail.com>
   Copyright (C) 2012 Ariya Hidayat <ariya.hidayat@gmail.com>
@@ -37941,9 +38080,9 @@ module.exports={
 }));
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{}],36:[function(require,module,exports){
-
 },{}],37:[function(require,module,exports){
+
+},{}],38:[function(require,module,exports){
 (function (process){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -38171,7 +38310,7 @@ var substr = 'ab'.substr(-1) === 'b'
 ;
 
 }).call(this,require("JkpR2F"))
-},{"JkpR2F":38}],38:[function(require,module,exports){
+},{"JkpR2F":39}],39:[function(require,module,exports){
 // shim for using process in browser
 
 var process = module.exports = {};
@@ -38236,7 +38375,7 @@ process.chdir = function (dir) {
     throw new Error('process.chdir is not supported');
 };
 
-},{}],39:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 /*
  * Copyright 2009-2011 Mozilla Foundation and contributors
  * Licensed under the New BSD license. See LICENSE.txt or:
@@ -38246,7 +38385,7 @@ exports.SourceMapGenerator = require('./source-map/source-map-generator').Source
 exports.SourceMapConsumer = require('./source-map/source-map-consumer').SourceMapConsumer;
 exports.SourceNode = require('./source-map/source-node').SourceNode;
 
-},{"./source-map/source-map-consumer":45,"./source-map/source-map-generator":46,"./source-map/source-node":47}],40:[function(require,module,exports){
+},{"./source-map/source-map-consumer":46,"./source-map/source-map-generator":47,"./source-map/source-node":48}],41:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -38345,7 +38484,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./util":48,"amdefine":49}],41:[function(require,module,exports){
+},{"./util":49,"amdefine":50}],42:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -38489,7 +38628,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./base64":42,"amdefine":49}],42:[function(require,module,exports){
+},{"./base64":43,"amdefine":50}],43:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -38533,7 +38672,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":49}],43:[function(require,module,exports){
+},{"amdefine":50}],44:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -38615,7 +38754,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":49}],44:[function(require,module,exports){
+},{"amdefine":50}],45:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2014 Mozilla Foundation and contributors
@@ -38703,7 +38842,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./util":48,"amdefine":49}],45:[function(require,module,exports){
+},{"./util":49,"amdefine":50}],46:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -39280,7 +39419,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./array-set":40,"./base64-vlq":41,"./binary-search":43,"./util":48,"amdefine":49}],46:[function(require,module,exports){
+},{"./array-set":41,"./base64-vlq":42,"./binary-search":44,"./util":49,"amdefine":50}],47:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -39682,7 +39821,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./array-set":40,"./base64-vlq":41,"./mapping-list":44,"./util":48,"amdefine":49}],47:[function(require,module,exports){
+},{"./array-set":41,"./base64-vlq":42,"./mapping-list":45,"./util":49,"amdefine":50}],48:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -40098,7 +40237,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./source-map-generator":46,"./util":48,"amdefine":49}],48:[function(require,module,exports){
+},{"./source-map-generator":47,"./util":49,"amdefine":50}],49:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -40419,7 +40558,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":49}],49:[function(require,module,exports){
+},{"amdefine":50}],50:[function(require,module,exports){
 (function (process,__filename){
 /** vim: et:ts=4:sw=4:sts=4
  * @license amdefine 1.0.0 Copyright (c) 2011-2015, The Dojo Foundation All Rights Reserved.
@@ -40724,7 +40863,7 @@ function amdefine(module, requireFn) {
 module.exports = amdefine;
 
 }).call(this,require("JkpR2F"),"/../node_modules/source-map/node_modules/amdefine/amdefine.js")
-},{"JkpR2F":38,"path":37}],50:[function(require,module,exports){
+},{"JkpR2F":39,"path":38}],51:[function(require,module,exports){
 /*!
  * string_score.js: String Scoring Algorithm 0.1.22
  *
@@ -40830,7 +40969,7 @@ String.prototype.score = function (word, fuzziness) {
   return finalScore;
 };
 
-},{}],51:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 /*
 Author: Geraint Luff and others
 Year: 2013
